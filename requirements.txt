@@ -1,20 +1,20 @@
-# Wan Studio — pinned dependencies
-# Target: HF ZeroGPU (Blackwell sm_120) + local MPS dev (M5 Max)
-# Refer to RESEARCH.md §12 for the full dependency matrix and rationale.
+# Wan Studio — Phase 1 pinned dependencies
+# Verified empirically against the ZeroGPU Blackwell MIG environment:
+#   torch 2.11.0+cu130 / Python 3.12.12 / ZEROGPU_V2=true
 
 # Core ML
-torch>=2.8.0,<2.11          # sm_120 Blackwell support
+torch>=2.8.0,<2.12          # sm_120 Blackwell support, ZeroGPU runtime upper-bound
 diffusers>=0.38.0           # load_into_transformer_2 for Wan 2.2 MoE LoRA (PR #12074)
 transformers>=4.45          # UMT5EncoderModel, CLIPVisionModel
 accelerate>=0.34
 peft>=0.13
 
 # HF infrastructure
-huggingface_hub>=0.27       # snapshot_download, Storage Bucket
+huggingface_hub>=1.0,<2.0   # v1.x API — note HfFolder removed
 spaces>=0.50.2              # ZeroGPU @spaces.GPU + AOTI API
-gradio>=5.4                 # gr.Sidebar, gr.Video buttons, route()
+gradio>=5.49.0              # HfFolder import compat fix landed here
 
-# Quantization (ZeroGPU large only; guarded by backend check)
+# Quantization (ZeroGPU-only, guarded — not installed locally on MPS)
 torchao>=0.7
 
 # Video / image I/O
@@ -25,9 +25,10 @@ Pillow>=11.0
 numpy>=2.0
 einops>=0.8
 
-# Audio (S2V mode)
+# Audio (S2V mode — preload for parity even though Phase 1 doesn't use it)
 librosa>=0.10
 soundfile>=0.13
 
-# Dev / utils
-python-dotenv>=1.0
+# Dev tooling
+pytest>=8.0
+ruff>=0.6
