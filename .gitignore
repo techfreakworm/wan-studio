@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Local dev artifacts
+/tmp/
+.superpowers/
+*.log
+
+# HF cache (local dev only — Space mounts handle prod)
+.cache/
+
+# Output videos from local smoke tests
+/tests/outputs/
+*.mp4
+
+# Codex generated images (local-only)
+~/.codex/

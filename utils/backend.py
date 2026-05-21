@@ -1,0 +1,98 @@
+"""Backend detection — device + dtype + ZeroGPU awareness.
+
+Refer to RESEARCH.md §7 for the per-backend loading recipe rationale.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+import torch
+
+Device = Literal["cuda", "mps", "cpu"]
+
+
+@dataclass(frozen=True)
+class Backend:
+    device: Device
+    dtype: torch.dtype
+    vae_dtype: torch.dtype
+    is_zerogpu: bool
+    zerogpu_size: Literal["large", "xlarge"] | None  # None on MPS/CPU
+    supports_quant: bool          # FP8 via torchao
+    supports_aoti: bool           # spaces.aoti_*
+    supports_flash_attn_3: bool
+
+    @property
+    def label(self) -> str:
+        if self.is_zerogpu:
+            return f"ZeroGPU ({self.zerogpu_size})"
+        if self.device == "mps":
+            return "MPS (Apple Silicon)"
+        if self.device == "cuda":
+            return "CUDA (self-hosted)"
+        return "CPU"
+
+
+def detect() -> Backend:
+    is_zerogpu = os.getenv("SPACES_ZERO_GPU") is not None
+
+    if torch.cuda.is_available():
+        device: Device = "cuda"
+        dtype = torch.bfloat16
+        vae_dtype = torch.float32
+        zerogpu_size = (
+            "xlarge" if os.getenv("WAN_STUDIO_TIER", "large") == "xlarge" else "large"
+        ) if is_zerogpu else None
+        return Backend(
+            device=device,
+            dtype=dtype,
+            vae_dtype=vae_dtype,
+            is_zerogpu=is_zerogpu,
+            zerogpu_size=zerogpu_size,
+            supports_quant=True,
+            supports_aoti=is_zerogpu,
+            supports_flash_attn_3=True,
+        )
+
+    if torch.backends.mps.is_available():
+        return Backend(
+            device="mps",
+            dtype=torch.float16,       # MPS bf16 still patchy as of mid-2026
+            vae_dtype=torch.float32,
+            is_zerogpu=False,
+            zerogpu_size=None,
+            supports_quant=False,      # FP8 crashes Metal
+            supports_aoti=False,
+            supports_flash_attn_3=False,
+        )
+
+    return Backend(
+        device="cpu",
+        dtype=torch.float32,
+        vae_dtype=torch.float32,
+        is_zerogpu=False,
+        zerogpu_size=None,
+        supports_quant=False,
+        supports_aoti=False,
+        supports_flash_attn_3=False,
+    )
+
+
+def spaces_gpu_or_noop():
+    """Returns the `spaces.GPU` decorator if running on ZeroGPU, otherwise a no-op.
+
+    `import spaces` is safe outside ZeroGPU (the decorator is effect-free), but this
+    helper keeps the decorator-call site terse and avoids the `spaces` dependency
+    erroring on environments where it isn't installed.
+    """
+    try:
+        import spaces  # type: ignore
+        return spaces.GPU
+    except ImportError:
+        def _noop(*_args, **_kwargs):
+            def deco(fn):
+                return fn
+            return deco
+        return _noop
