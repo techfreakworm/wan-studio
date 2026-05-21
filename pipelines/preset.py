@@ -32,7 +32,7 @@ def resolve(card: ModelCard, requested: Preset) -> PresetKwargs:
         return PresetKwargs(
             num_inference_steps=card.quality_steps,
             guidance_scale=card.quality_guidance,
-            guidance_scale_2=card.quality_guidance if card.is_moe else None,
+            guidance_scale_2=card.quality_guidance_2 if card.is_moe else None,
             flow_shift=card.flow_shift,
             lora_active=False,
             effective_preset="quality",
@@ -57,7 +57,7 @@ def resolve(card: ModelCard, requested: Preset) -> PresetKwargs:
     return PresetKwargs(
         num_inference_steps=card.quality_steps,
         guidance_scale=card.quality_guidance,
-        guidance_scale_2=card.quality_guidance if card.is_moe else None,
+        guidance_scale_2=card.quality_guidance_2 if card.is_moe else None,
         flow_shift=card.flow_shift,
         lora_active=False,
         effective_preset="quality",

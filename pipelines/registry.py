@@ -36,6 +36,7 @@ class ModelCard:
     quality_guidance: float
     flow_shift: float
     zerogpu_duration: int                 # seconds for one run at Fast preset
+    quality_guidance_2: float | None = None  # MoE low-noise stage; None for non-MoE
     notes: str = ""
 
 
@@ -189,9 +190,11 @@ WAN_2_2: list[ModelCard] = [
         lightning_high_lora="LoRAs/Wan22-Lightning/Wan22_A14B_T2V_HIGH_Lightning_4steps_lora_250928_rank128_fp16.safetensors",
         lightning_low_lora="LoRAs/Wan22-Lightning/Wan22_A14B_T2V_LOW_Lightning_4steps_lora_250928_rank64_fp16.safetensors",
         lightning_steps=4, lightning_guidance=1.0,
-        quality_steps=40, quality_guidance=4.0, flow_shift=12.0,
+        quality_steps=40, quality_guidance=3.0, flow_shift=12.0,
         zerogpu_duration=120,
-        notes="MoE: HIGH→transformer, LOW→transformer_2 (load_into_transformer_2=True).",
+        quality_guidance_2=4.0,
+        notes="MoE: HIGH→transformer, LOW→transformer_2 (load_into_transformer_2=True). "
+              "Quality CFG per Wan repo wan_t2v_A14B.py sample_guide_scale=(3.0, 4.0).",
     ),
     ModelCard(
         key="wan2.2_i2v_a14b",
@@ -208,6 +211,7 @@ WAN_2_2: list[ModelCard] = [
         lightning_steps=4, lightning_guidance=1.0,
         quality_steps=40, quality_guidance=3.5, flow_shift=8.0,
         zerogpu_duration=150,
+        quality_guidance_2=3.5,
         notes="Only V1 (Seko) I2V LoRA. Hybrid trick: reuse Wan 2.1 lightx2v I2V LoRA for sharper output.",
     ),
     ModelCard(
