@@ -17,6 +17,7 @@ from pipelines.registry import (
 )
 from pipelines.preset import Preset, PresetKwargs, resolve
 from pipelines.handle import WanModelHandle
+from pipelines.t2v import T2VHandle
 
 __all__ = [
     "ALL_MODELS",
@@ -33,4 +34,5 @@ __all__ = [
     "PresetKwargs",
     "resolve",
     "WanModelHandle",
+    "T2VHandle",
 ]
