@@ -16,6 +16,7 @@ from pipelines.registry import (
     modes_in,
 )
 from pipelines.preset import Preset, PresetKwargs, resolve
+from pipelines.handle import WanModelHandle
 
 __all__ = [
     "ALL_MODELS",
@@ -31,4 +32,5 @@ __all__ = [
     "Preset",
     "PresetKwargs",
     "resolve",
+    "WanModelHandle",
 ]
