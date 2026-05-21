@@ -18,6 +18,7 @@ from pipelines.registry import (
 from pipelines.preset import Preset, PresetKwargs, resolve
 from pipelines.handle import WanModelHandle
 from pipelines.t2v import T2VHandle
+from pipelines.i2v import I2VHandle, aspect_ratio_resize
 
 __all__ = [
     "ALL_MODELS",
@@ -35,4 +36,6 @@ __all__ = [
     "resolve",
     "WanModelHandle",
     "T2VHandle",
+    "I2VHandle",
+    "aspect_ratio_resize",
 ]
