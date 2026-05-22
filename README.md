@@ -2,7 +2,7 @@
 title: Wan Studio
 emoji: 🎬
 colorFrom: indigo
-colorTo: slate
+colorTo: gray
 sdk: gradio
 sdk_version: "5.49.0"
 app_file: app.py
