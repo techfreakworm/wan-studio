@@ -1,7 +1,11 @@
 """Wan Studio — Gradio entry point (design v2/2: Linear-inspired).
 
 Refined dev-tool dark: warm near-black surface, Geist typography, hairline
-borders, restrained accent. Demo mode: Generate buttons fire a no-op toast.
+borders, restrained accent.
+
+T2V + I2V Generate buttons are wired to the real `pipelines.{t2v,i2v}` handles
+(Wave F+G). All other tabs (TI2V, FLF2V, V2V, VACE, S2V, Animate) still fire a
+no-op toast until their pipelines are wired in later waves.
 """
 from __future__ import annotations
 
@@ -12,6 +16,296 @@ import gradio as gr
 from pipelines import modes_in
 from ui import build_all_tabs, build_header, build_sidebar, MODE_PILLS
 from utils import detect
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Generate-handler helpers — kept at module scope so the `@spaces.GPU(...)`
+# decorator can reference `duration=`/`size=` callables that match the wrapped
+# function's signature.  Everything heavy (diffusers, torch, model handles)
+# stays lazy: nothing imports diffusers or instantiates a handle at module
+# import time, so `from app import build; build()` is cheap.
+# ────────────────────────────────────────────────────────────────────────────
+
+# Per-key handle caches.  Populated on first Generate click for that key.
+T2V_HANDLES: dict = {}
+I2V_HANDLES: dict = {}
+
+
+def _t2v_key_for(generation: str) -> str:
+    """Map generation selector → registry key for T2V."""
+    key = "wan2.2_t2v_a14b" if generation == "wan2.2" else "wan2.1_t2v_14b"
+    # Local-dev override: allow forcing 1.3B for faster MPS smoke
+    local_override = os.getenv("WAN_STUDIO_T2V_LOCAL_KEY")
+    if local_override and os.getenv("SPACES_ZERO_GPU") is None:
+        key = local_override
+    return key
+
+
+def _i2v_key_for(generation: str, resolution_label: str) -> str:
+    """Map (generation, resolution) → registry key for I2V."""
+    if generation == "wan2.2":
+        key = "wan2.2_i2v_a14b"
+    elif "720" in (resolution_label or ""):
+        key = "wan2.1_i2v_14b_720p"
+    else:
+        key = "wan2.1_i2v_14b_480p"
+    local_override = os.getenv("WAN_STUDIO_I2V_LOCAL_KEY")
+    if local_override and os.getenv("SPACES_ZERO_GPU") is None:
+        key = local_override
+    return key
+
+
+def _get_t2v_handle(generation: str):
+    """Lazy-load + cache a T2VHandle keyed by registry key."""
+    from pipelines.t2v import T2VHandle
+    key = _t2v_key_for(generation)
+    if key not in T2V_HANDLES:
+        T2V_HANDLES[key] = T2VHandle.for_key(key)
+    return T2V_HANDLES[key]
+
+
+def _get_i2v_handle(generation: str, resolution_label: str):
+    """Lazy-load + cache an I2VHandle keyed by registry key."""
+    from pipelines.i2v import I2VHandle
+    key = _i2v_key_for(generation, resolution_label)
+    if key not in I2V_HANDLES:
+        I2V_HANDLES[key] = I2VHandle.for_key(key)
+    return I2V_HANDLES[key]
+
+
+def _parse_resolution(label: str) -> tuple[int, int]:
+    """'1280 × 720  (16:9)' or '1280x720 (16:9)' → (height, width)."""
+    import re
+    m = re.search(r"(\d+)\s*[x×]\s*(\d+)", label or "")
+    if not m:
+        return 720, 1280
+    w, h = int(m.group(1)), int(m.group(2))
+    return h, w
+
+
+# --- @spaces.GPU(duration=..., size=...) callables.  These MUST share the
+# wrapped function's signature (Spaces inspects bound args to call them).
+
+def _get_t2v_duration(prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
+    from utils.budget import duration_for
+    return duration_for(_t2v_key_for(generation), duration_s=float(duration_s or 3.0))
+
+
+def _get_t2v_size(prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
+    from utils.budget import size_for
+    return size_for(_t2v_key_for(generation))
+
+
+def _get_i2v_duration(image, prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
+    from utils.budget import duration_for
+    return duration_for(_i2v_key_for(generation, resolution_label), duration_s=float(duration_s or 3.0))
+
+
+def _get_i2v_size(image, prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
+    from utils.budget import size_for
+    return size_for(_i2v_key_for(generation, resolution_label))
+
+
+def _coerce_preset(preset_label: str) -> str:
+    """Header `preset_state` may carry either the literal 'fast'/'quality'
+    string or a user-facing 'Fast'/'Quality' label — normalize to lower."""
+    return "fast" if preset_label and str(preset_label).lower().startswith("fast") else "quality"
+
+
+def _raise_user_error(e: BaseException) -> None:
+    """Translate a low-level exception into a gr.Error toast for the user."""
+    # OOM: hard to recover from in-handler, so message the user with a hint.
+    try:
+        import torch
+        if hasattr(torch, "cuda") and hasattr(torch.cuda, "OutOfMemoryError") and isinstance(e, torch.cuda.OutOfMemoryError):
+            raise gr.Error(f"GPU out of memory. Try a smaller resolution or shorter duration. ({e})") from e
+    except ImportError:
+        pass
+    if isinstance(e, FileNotFoundError):
+        raise gr.Error(f"Model files not found — volume mount may be missing on the Space. ({e})") from e
+    import traceback
+    print(traceback.format_exc())
+    raise gr.Error(f"Generation failed: {type(e).__name__}: {e}") from e
+
+
+def _build_t2v_handler():
+    """Build the decorated T2V Generate handler.  The `@spaces.GPU(...)`
+    decorator is fetched at call time so `import spaces` only runs when we're
+    actually on ZeroGPU (locally `spaces_gpu_or_noop` is a no-op factory).
+    """
+    from utils.backend import spaces_gpu_or_noop
+
+    @spaces_gpu_or_noop()(duration=_get_t2v_duration, size=_get_t2v_size)
+    def generate_t2v(
+        prompt: str,
+        generation: str,
+        preset_label: str,
+        resolution_label: str,
+        duration_s: float,
+        negative_prompt: str,
+        seed: int,
+        randomize: bool,
+        steps_override: int,
+        cfg_override: float,
+        cfg_2_override: float,
+        progress=gr.Progress(track_tqdm=True),
+    ):
+        import random
+        import tempfile
+        from diffusers.utils import export_to_video
+
+        if not prompt or not str(prompt).strip():
+            raise gr.Error("Prompt is required.")
+
+        try:
+            if randomize:
+                seed = random.randint(0, 2**31 - 1)
+
+            preset = _coerce_preset(preset_label)
+            handle = _get_t2v_handle(generation)
+            progress(0.05, desc="Configuring preset…")
+            preset_kwargs = handle.configure_preset(preset)
+
+            inference_kwargs = {
+                "num_inference_steps": (
+                    int(steps_override) if steps_override and int(steps_override) > 0
+                    else preset_kwargs.num_inference_steps
+                ),
+                "guidance_scale": (
+                    float(cfg_override) if cfg_override and float(cfg_override) > 0
+                    else preset_kwargs.guidance_scale
+                ),
+            }
+            if preset_kwargs.guidance_scale_2 is not None:
+                inference_kwargs["guidance_scale_2"] = (
+                    float(cfg_2_override) if cfg_2_override and float(cfg_2_override) > 0
+                    else preset_kwargs.guidance_scale_2
+                )
+
+            height, width = _parse_resolution(resolution_label)
+            # Wan VAE temporal patching: num_frames must be 4k+1.
+            num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+
+            progress(0.2, desc="Generating frames…")
+            frames = handle.generate(
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                seed=int(seed),
+                preset_kwargs=inference_kwargs,
+            )
+
+            progress(0.9, desc="Encoding MP4…")
+            fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_t2v_")
+            os.close(fd)
+            export_to_video(frames, out_path, fps=16)
+
+            if preset_kwargs.fallback_message:
+                gr.Info(preset_kwargs.fallback_message, duration=8)
+            return out_path
+        except gr.Error:
+            raise
+        except Exception as e:
+            _raise_user_error(e)
+
+    return generate_t2v
+
+
+def _build_i2v_handler():
+    """Mirror of `_build_t2v_handler` for image-to-video.  Auto-picks the
+    checkpoint by (generation × resolution) and coerces filepath → PIL.Image."""
+    from utils.backend import spaces_gpu_or_noop
+
+    @spaces_gpu_or_noop()(duration=_get_i2v_duration, size=_get_i2v_size)
+    def generate_i2v(
+        image,
+        prompt: str,
+        generation: str,
+        preset_label: str,
+        resolution_label: str,
+        duration_s: float,
+        negative_prompt: str,
+        seed: int,
+        randomize: bool,
+        steps_override: int,
+        cfg_override: float,
+        cfg_2_override: float,
+        progress=gr.Progress(track_tqdm=True),
+    ):
+        import random
+        import tempfile
+        from diffusers.utils import export_to_video
+        from PIL import Image
+
+        if image is None:
+            raise gr.Error("Please upload an image.")
+        if not prompt or not str(prompt).strip():
+            raise gr.Error("Motion prompt is required.")
+
+        try:
+            # Coerce filepath → PIL.Image (gr.Image type="pil" already yields a
+            # PIL.Image, but tolerate strings for callers that bind type="filepath").
+            if isinstance(image, str):
+                image = Image.open(image).convert("RGB")
+            elif hasattr(image, "convert"):
+                image = image.convert("RGB")
+
+            if randomize:
+                seed = random.randint(0, 2**31 - 1)
+
+            preset = _coerce_preset(preset_label)
+            handle = _get_i2v_handle(generation, resolution_label)
+            progress(0.05, desc="Configuring preset…")
+            preset_kwargs = handle.configure_preset(preset)
+
+            inference_kwargs = {
+                "num_inference_steps": (
+                    int(steps_override) if steps_override and int(steps_override) > 0
+                    else preset_kwargs.num_inference_steps
+                ),
+                "guidance_scale": (
+                    float(cfg_override) if cfg_override and float(cfg_override) > 0
+                    else preset_kwargs.guidance_scale
+                ),
+            }
+            if preset_kwargs.guidance_scale_2 is not None:
+                inference_kwargs["guidance_scale_2"] = (
+                    float(cfg_2_override) if cfg_2_override and float(cfg_2_override) > 0
+                    else preset_kwargs.guidance_scale_2
+                )
+
+            # max_area drives `aspect_ratio_resize` — clamp to the picked res.
+            h_label, w_label = _parse_resolution(resolution_label)
+            max_area = h_label * w_label
+            num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+
+            progress(0.2, desc="Generating frames…")
+            frames = handle.generate(
+                image=image,
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+                max_area=max_area,
+                num_frames=num_frames,
+                seed=int(seed),
+                preset_kwargs=inference_kwargs,
+            )
+
+            progress(0.9, desc="Encoding MP4…")
+            fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_i2v_")
+            os.close(fd)
+            export_to_video(frames, out_path, fps=16)
+
+            if preset_kwargs.fallback_message:
+                gr.Info(preset_kwargs.fallback_message, duration=8)
+            return out_path
+        except gr.Error:
+            raise
+        except Exception as e:
+            _raise_user_error(e)
+
+    return generate_i2v
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -975,17 +1269,81 @@ def build() -> gr.Blocks:
             outputs=[header["preset_state"], header["preset_fast"], header["preset_quality"]],
         )
 
-        # ── Generate handlers: demo-mode toast everywhere ────────────────
+        # ── Generate handlers ────────────────────────────────────────────
+        # T2V + I2V → real handles (Wave F+G). Other tabs keep the no-op
+        # toast until their pipelines land in later waves.
         def _generate_toast():
             gr.Info("Demo mode — Generate disabled while design direction is being chosen.")
 
-        for tab_key in ["t2v", "i2v", "ti2v", "flf2v", "v2v", "vace", "s2v", "animate"]:
+        # --- T2V: wire to the real handle ---
+        t2v_in = tabs["t2v"]["inputs"]
+        t2v_out = tabs["t2v"]["outputs"]
+        t2v_in["generate"].click(
+            fn=_build_t2v_handler(),
+            inputs=[
+                t2v_in["prompt"],
+                header["generation"],
+                header["preset_state"],
+                t2v_in["resolution"],
+                t2v_in["duration"],
+                t2v_in["negative_prompt"],
+                t2v_in["seed"],
+                t2v_in["randomize"],
+                t2v_in["steps"],
+                t2v_in["cfg"],
+                t2v_in["cfg_2"],
+            ],
+            outputs=t2v_out["video"],
+        )
+
+        # --- I2V: wire to the real handle ---
+        i2v_in = tabs["i2v"]["inputs"]
+        i2v_out = tabs["i2v"]["outputs"]
+        i2v_in["generate"].click(
+            fn=_build_i2v_handler(),
+            inputs=[
+                i2v_in["image"],
+                i2v_in["prompt"],
+                header["generation"],
+                header["preset_state"],
+                i2v_in["resolution"],
+                i2v_in["duration"],
+                i2v_in["negative_prompt"],
+                i2v_in["seed"],
+                i2v_in["randomize"],
+                i2v_in["steps"],
+                i2v_in["cfg"],
+                i2v_in["cfg_2"],
+            ],
+            outputs=i2v_out["video"],
+        )
+
+        # --- Other tabs stay on the no-op toast ---
+        for tab_key in ["ti2v", "flf2v", "v2v", "vace", "s2v", "animate"]:
             gen_btn = tabs[tab_key]["inputs"].get("generate") if "inputs" in tabs[tab_key] else None
             if gen_btn is not None:
                 gen_btn.click(fn=_generate_toast, inputs=None, outputs=None)
         # FLF2V has a secondary "Generate end frame" button.
         if "inputs" in tabs.get("flf2v", {}) and "generate_end" in tabs["flf2v"]["inputs"]:
             tabs["flf2v"]["inputs"]["generate_end"].click(fn=_generate_toast, inputs=None, outputs=None)
+
+        # --- cfg_2 visibility toggle (Wan 2.2 MoE has high/low-noise CFG) ---
+        def _toggle_cfg_2(generation: str):
+            is_moe = (generation == "wan2.2")
+            return [gr.update(visible=is_moe), gr.update(visible=is_moe)]
+
+        header["generation"].change(
+            fn=_toggle_cfg_2,
+            inputs=[header["generation"]],
+            outputs=[t2v_in["cfg_2"], i2v_in["cfg_2"]],
+        )
+        # Seed initial visibility — default `generation=wan2.2` is MoE so
+        # cfg_2 must start visible, but `tabs.py` mounts it `visible=False`.
+        demo.load(
+            fn=_toggle_cfg_2,
+            inputs=[header["generation"]],
+            outputs=[t2v_in["cfg_2"], i2v_in["cfg_2"]],
+        )
 
         # ── About-block refresh ──────────────────────────────────────────
         def _refresh_about(generation: str, preset: str) -> str:
