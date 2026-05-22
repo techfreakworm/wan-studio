@@ -1,52 +1,61 @@
+---
+title: Wan Studio
+emoji: 🎬
+colorFrom: indigo
+colorTo: slate
+sdk: gradio
+sdk_version: "5.49.0"
+app_file: app.py
+pinned: false
+short_description: "Every Wan mode, one clean UI."
+python_version: "3.12.12"
+startup_duration_timeout: "30m"
+preload_from_hub:
+  - techfreakworm/wan-lightning-loras
+# ZeroGPU hardware is set programmatically by scripts/create_space.py
+# (SpaceHardware.ZERO_A10G — empirically the live Blackwell ZeroGPU V2 pool
+# as of May 2026).
+---
+
 # Wan Studio
 
-Multi-mode Gradio Studio for the Alibaba Wan video diffusion family (Wan 2.1 + Wan 2.2), targeting HF ZeroGPU (Blackwell) and local MPS (Apple Silicon).
+Multi-mode Gradio Studio for the Alibaba Wan video diffusion family. Phase 1
+ships **Text-to-Video** and **Image-to-Video** on **Wan 2.1** (T2V-14B,
+I2V-14B 480P/720P) and **Wan 2.2** (T2V-A14B MoE, I2V-A14B MoE) with two
+quality presets:
 
-See [`RESEARCH.md`](RESEARCH.md) for the full architecture brief, model inventory, mode deep-dive, ZeroGPU integration recipe, Lightning LoRA strategy, UX wireframes, and dependency matrix.
+- **Fast (Lightning)** — 4 steps, CFG = 1.0, official Lightning LoRA loaded
+- **Quality** — 30-50 steps, full sampler, no LoRA
 
-## Status — Phase 0 (UI shell only)
+Pick generation and preset from the header. Modes live in the left sidebar.
 
-Sidebar + header + per-mode tabs render. **No actual generation yet.** Wireframes for every screen are in [`wireframes/`](wireframes/) (open `wireframes/index.html` for the gallery).
+Backed by HF ZeroGPU (Blackwell sm_120). Model weights are mounted read-only
+from duplicated mirrors in the maintainer's HF account for resilience against
+upstream changes.
 
-## Quick start (local MPS)
+## Roadmap
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python app.py
-```
+| Phase | Modes | Status |
+|---|---|---|
+| 1 | T2V, I2V | **in progress** |
+| 2 | FLF2V, V2V, TI2V-5B | planned |
+| 3 | VACE (depth, pose, sketch, inpaint, outpaint, reference, extension) | planned |
+| 4 | Animate (character animation + replacement) | planned |
+| 5 | S2V (speech-to-video, audio-driven) | planned |
+| 6 | Cross-mode chaining + Gallery + Settings polish | planned |
 
-Open <http://localhost:7860> in your browser.
+## Architecture
 
-## Layout
+- **Single Space** (this one) — no multi-Space federation.
+- **Volume-mounted model weights** at `/models/<slug>` via `huggingface_hub.Volume`.
+- **Lightning LoRA mirror** at `/models/wan-lightning-loras` (HIGH + LOW LoRA pairs for Wan 2.2 MoE; single LoRAs for Wan 2.1).
+- **Per-mode handle classes** (`T2VHandle`, `I2VHandle`, etc.) lazy-load on first generate. Shared text-encoder / VAE / image-encoder loaded once at module top.
+- **MPS-aware**: same codebase runs locally on Apple Silicon for development (fp16 transformer / fp32 VAE / no quant), and on ZeroGPU Blackwell for production (bf16 / optional torchao FP8 + AOTI).
 
-```
-wan-studio/
-├── RESEARCH.md            # full architecture brief (1100+ lines)
-├── app.py                 # Gradio entry point
-├── requirements.txt       # pinned deps (torch 2.8+, diffusers 0.38+, etc.)
-├── pipelines/
-│   ├── registry.py        # source-of-truth (gen, mode, checkpoint) catalog
-│   ├── shared.py          # text-encoder / VAE / image-encoder shared loaders
-│   ├── preset.py          # Fast / Quality preset resolver with graceful fallback
-│   └── __init__.py
-├── ui/
-│   ├── header.py          # generation dropdown + Fast/Quality radio + nav icons
-│   ├── sidebar.py         # left mode picker
-│   ├── tabs.py            # per-mode panels (T2V, I2V, FLF2V, VACE, S2V, Animate, ...)
-│   └── __init__.py
-├── utils/
-│   ├── backend.py         # device + dtype detection + ZeroGPU awareness
-│   └── __init__.py
-├── tests/                 # pytest stubs (Phase 1+)
-├── assets/                # any static files served at /file
-├── raw/                   # research artifacts (per-topic deep dives + reference Spaces)
-└── wireframes/            # 8 PNG mockups + index.html gallery
-```
+## Attribution
 
-## Implementation phases
+See [NOTICE.md](NOTICE.md) for Apache 2.0 attribution to Wan-AI, lightx2v, diffusers, and Gradio.
 
-See [`RESEARCH.md` §11](RESEARCH.md#11-impl-plan) — 9 phases, ~3-4 weeks total, MVP in 7-9 days.
+## Maintainer
 
-Current: **Phase 0 — Scaffold + UI shell.** Next: **Phase 1 — T2V + I2V on Wan 2.1 14B end-to-end.**
+Mayank Gupta · [@techfreakworm](https://huggingface.co/techfreakworm) · [github.com/techfreakworm/wan-studio](https://github.com/techfreakworm/wan-studio)
