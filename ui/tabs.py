@@ -34,7 +34,8 @@ def _output_column(default_eta: str = "~?s"):
     eta = gr.Markdown(f"⌚ ZeroGPU reservation: **{default_eta}**")
     progress = gr.HTML(visible=False)
     with gr.Row():
-        gr.Markdown("Send to:", scale=1)
+        with gr.Column(scale=1, min_width=70):
+            gr.Markdown("Send to:")
         sendto = {
             "i2v": gr.Button("I2V", size="sm", scale=0),
             "vace": gr.Button("VACE", size="sm", scale=0),
