@@ -9,6 +9,17 @@ no-op toast until their pipelines are wired in later waves.
 """
 from __future__ import annotations
 
+# IMPORTANT: import `spaces` BEFORE any CUDA-related package (torch, diffusers,
+# transformers, peft) so the ZeroGPU runtime can fork CUDA correctly.  Once
+# torch has touched CUDA, `import spaces` raises:
+#   RuntimeError: CUDA has been initialized before importing the `spaces` package.
+# `pipelines` and `utils` both transitively import torch, so this MUST stay
+# at the top of the entry-point file.  Outside ZeroGPU the import is a no-op.
+try:
+    import spaces  # noqa: F401
+except ImportError:
+    pass
+
 import os
 
 import gradio as gr
