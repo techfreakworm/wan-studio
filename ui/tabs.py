@@ -3,6 +3,12 @@
 Phase 0: each panel is a stubbed `gr.Column` with mode-appropriate inputs but no
 actual generation function wired. The output column is a placeholder `gr.Video`.
 
+Round 1 fix — navigation is now driven 100% client-side. All 10 panels are
+mounted with `visible=True` (Gradio never toggles visibility), and a JS event
+handler in app.py adds/removes a `ws-mode-panel-active` class on whichever
+panel the sidebar selected. Gradio sends ZERO backend updates per nav click,
+so there's no cascade for Svelte to choke on.
+
 Phase 1+ will plug `pipelines.{t2v,i2v,...}` into the Generate buttons.
 """
 from __future__ import annotations
@@ -66,10 +72,19 @@ def _advanced_accordion():
     }
 
 
+def _panel(elem_id: str, initial: bool = False):
+    """Mount a mode panel.  Initial-active gets the `ws-mode-panel-active`
+    class so it's visible on first paint; the others get only `ws-mode-panel`
+    and CSS hides them until JS toggles them on."""
+    classes = ["ws-mode-panel"] + (["ws-mode-panel-active"] if initial else [])
+    # NOTE: visible=True everywhere — JS does the show/hide, not Gradio.
+    return gr.Column(visible=True, elem_id=elem_id, elem_classes=classes)
+
+
 def build_t2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=True, elem_id="tab-t2v") as tab:
-        gr.Markdown("## T2V — Text-to-Video")
+    with _panel("tab-t2v", initial=True) as tab:
+        gr.Markdown("## T2V — Text-to-Video", elem_classes=["mode-title"])
         def _inputs():
             prompt = gr.Textbox(
                 label="Prompt", lines=4,
@@ -94,8 +109,8 @@ def build_t2v_tab() -> dict:
 
 def build_i2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-i2v") as tab:
-        gr.Markdown("## I2V — Image-to-Video")
+    with _panel("tab-i2v") as tab:
+        gr.Markdown("## I2V — Image-to-Video", elem_classes=["mode-title"])
         def _inputs():
             image = gr.Image(
                 type="pil", sources=["upload", "clipboard"],
@@ -123,8 +138,8 @@ def build_i2v_tab() -> dict:
 
 def build_flf2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-flf2v") as tab:
-        gr.Markdown("## FLF2V — First-Last-Frame to Video (Wan 2.1 only)")
+    with _panel("tab-flf2v") as tab:
+        gr.Markdown("## FLF2V — First-Last-Frame to Video (Wan 2.1 only)", elem_classes=["mode-title"])
         def _inputs():
             with gr.Row():
                 start_frame = gr.Image(
@@ -164,8 +179,8 @@ def build_flf2v_tab() -> dict:
 
 def build_vace_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-vace") as tab:
-        gr.Markdown("## VACE — Versatile Animation Control & Editing (Wan 2.1 only)")
+    with _panel("tab-vace") as tab:
+        gr.Markdown("## VACE — Versatile Animation Control & Editing (Wan 2.1 only)", elem_classes=["mode-title"])
         def _inputs():
             submode = gr.Radio(
                 choices=[
@@ -206,8 +221,8 @@ def build_vace_tab() -> dict:
 
 def build_s2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-s2v") as tab:
-        gr.Markdown("## S2V — Speech to Video (Wan 2.2, via upstream `wan` package)")
+    with _panel("tab-s2v") as tab:
+        gr.Markdown("## S2V — Speech to Video (Wan 2.2, via upstream wan package)", elem_classes=["mode-title"])
         def _inputs():
             reference_image = gr.Image(
                 type="pil", sources=["upload", "clipboard"],
@@ -244,8 +259,8 @@ def build_s2v_tab() -> dict:
 
 def build_animate_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-animate") as tab:
-        gr.Markdown("## Animate — Character Animation & Replacement (Wan 2.2)")
+    with _panel("tab-animate") as tab:
+        gr.Markdown("## Animate — Character Animation & Replacement (Wan 2.2)", elem_classes=["mode-title"])
         def _inputs():
             character = gr.Image(
                 type="pil", sources=["upload", "clipboard"],
@@ -287,8 +302,8 @@ def build_animate_tab() -> dict:
 
 def build_v2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-v2v") as tab:
-        gr.Markdown("## V2V — Video-to-Video Restyle")
+    with _panel("tab-v2v") as tab:
+        gr.Markdown("## V2V — Video-to-Video Restyle", elem_classes=["mode-title"])
         def _inputs():
             video = gr.Video(sources=["upload"], label="Source video")
             prompt = gr.Textbox(label="Restyle prompt", lines=3)
@@ -306,8 +321,8 @@ def build_v2v_tab() -> dict:
 
 def build_ti2v_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-ti2v") as tab:
-        gr.Markdown("## TI2V — Text+Image to Video (Wan 2.2-5B, via upstream `wan` package)")
+    with _panel("tab-ti2v") as tab:
+        gr.Markdown("## TI2V — Text+Image to Video (Wan 2.2-5B, via upstream wan package)", elem_classes=["mode-title"])
         def _inputs():
             image = gr.Image(
                 type="pil", sources=["upload", "clipboard"],
@@ -334,11 +349,27 @@ def build_ti2v_tab() -> dict:
 
 def build_gallery_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-gallery") as tab:
-        gr.Markdown("## Gallery — session history")
+    with _panel("tab-gallery") as tab:
+        gr.Markdown("## Gallery — session history", elem_classes=["mode-title"])
+        # Empty-state hint shown until the first generation lands.
+        empty_state = gr.Markdown(
+            "_Generated videos will appear here._",
+            elem_classes=["ws-gallery-empty"],
+        )
+        # Read-only display of past outputs. `interactive=False` removes the
+        # "Drop Media Here / Click to Upload" affordance that made the gallery
+        # look like an upload zone.
         gallery = gr.Gallery(
-            label="Last 24 generations",
-            columns=4, rows=3, height=600, allow_preview=True, object_fit="contain",
+            label=None,
+            show_label=False,
+            columns=4,
+            rows=3,
+            height=560,
+            allow_preview=True,
+            object_fit="cover",
+            interactive=False,
+            value=[],
+            elem_classes=["ws-gallery-readonly"],
         )
         with gr.Row():
             preview = gr.Video(label="Selected", autoplay=True, loop=True, interactive=False)
@@ -350,6 +381,7 @@ def build_gallery_tab() -> dict:
             delete_btn = gr.Button("Delete", variant="stop")
             export_btn = gr.Button("Export")
         components.update(dict(
+            empty_state=empty_state,
             gallery=gallery, preview=preview, params=params,
             reload_t2v=reload_t2v, reload_vace=reload_vace, reload_animate=reload_animate,
             delete_btn=delete_btn, export_btn=export_btn,
@@ -360,8 +392,8 @@ def build_gallery_tab() -> dict:
 
 def build_settings_tab() -> dict:
     components = {}
-    with gr.Column(visible=False, elem_id="tab-settings") as tab:
-        gr.Markdown("## Settings — Model Manager")
+    with _panel("tab-settings") as tab:
+        gr.Markdown("## Settings — Model Manager", elem_classes=["mode-title"])
         with gr.Accordion("Active models per mode", open=True):
             components["model_status"] = gr.Markdown("Model load status appears here.")
         with gr.Accordion("Lightning LoRA status", open=False):

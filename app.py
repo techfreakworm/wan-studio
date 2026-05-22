@@ -76,8 +76,8 @@ THEME = gr.themes.Base(
     button_primary_background_fill_dark="#5e84ff",
     button_primary_background_fill_hover="#7497ff",
     button_primary_background_fill_hover_dark="#7497ff",
-    button_primary_text_color="#08090a",
-    button_primary_text_color_dark="#08090a",
+    button_primary_text_color="#ffffff",
+    button_primary_text_color_dark="#ffffff",
     button_primary_border_color="transparent",
     button_primary_border_color_dark="transparent",
     button_secondary_background_fill="#141518",
@@ -328,9 +328,11 @@ button.ws-pill {
 }
 button.ws-pill:hover { color: var(--ws-fg-dim) !important; background: transparent !important; }
 button.ws-pill-active {
-  background: var(--ws-elev) !important;
-  color: var(--ws-fg) !important;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.04), inset 0 0 0 1px var(--ws-border-strong) !important;
+  background: rgba(94, 132, 255, 0.14) !important;
+  color: #ffffff !important;
+  /* Drop the outer 0 1px 0 shadow that created a faint horizontal line under
+     the segmented control — the sticky header already owns the bottom hairline. */
+  box-shadow: inset 0 0 0 1px #5e84ff !important;
 }
 
 /* ─── Chrome nav buttons ───────────────────────────────────────────── */
@@ -400,22 +402,26 @@ button.ws-side-btn {
   box-shadow: none !important;
   transition: background 120ms ease, color 120ms ease !important;
 }
+/* Inactive nav rows have no leading glyph — Linear's nav rests on the
+   selected-state blue marker alone. */
 button.ws-side-btn::before {
   content: "" !important;
   position: absolute !important;
   left: 10px !important; top: 50% !important;
   width: 4px !important; height: 4px !important;
   border-radius: 50% !important;
-  background: var(--ws-fg-faint) !important;
+  background: transparent !important;
   transform: translateY(-50%) !important;
-  opacity: 0.6 !important;
-  transition: background 120ms ease, opacity 120ms ease !important;
+  opacity: 0 !important;
+  transition: background 120ms ease, opacity 120ms ease, box-shadow 120ms ease !important;
 }
 button.ws-side-btn:hover {
   background: var(--ws-surface-2) !important;
   color: var(--ws-fg) !important;
 }
-button.ws-side-btn:hover::before { background: var(--ws-fg-muted) !important; opacity: 1 !important; }
+/* No `:hover::before` rule — hovering must not override the active dot's
+   `::before` (which has lower specificity than :hover would have). The base
+   `button.ws-side-btn::before` keeps inactive dots invisible regardless. */
 button.ws-side-btn-active {
   background: var(--ws-elev) !important;
   color: var(--ws-fg) !important;
@@ -580,19 +586,16 @@ button.ws-side-btn-active::before {
   padding: 0 !important;
 }
 
-/* Generate button — full-width on tab inputs, leading ▶ glyph. */
+/* Generate button — full-width on tab inputs. The ▶ glyph prefix was dropped
+   (it was rendering near-black on electric blue and reading as a hairline). */
 #ws-content button.primary, #ws-content button[class*="primary"] {
   width: 100% !important;
   text-align: center !important;
+  color: #ffffff !important;
+  font-weight: 510 !important;
 }
 #ws-content button.primary::before, #ws-content button[class*="primary"]::before {
-  content: "▶  " !important;
-  color: #08090a !important;
-  opacity: 0.6 !important;
-  margin-right: 4px !important;
-  font-size: 10px !important;
-  display: inline-block !important;
-  transform: translateY(-1px) !important;
+  content: none !important;
 }
 
 /* Accordions in tab content are their own card. */
@@ -702,10 +705,11 @@ button.ws-side-btn-active::before {
   color: var(--ws-fg) !important;
 }
 
-/* Primary "Generate" buttons inside tabs — accent fill */
-button[class*="primary"], button.lg.primary, .gradio-container .primary {
+/* Primary "Generate" buttons inside tabs — accent fill, white label. */
+button[class*="primary"], button.lg.primary, .gradio-container .primary,
+.gr-button-primary, button[variant="primary"] {
   background: var(--ws-accent) !important;
-  color: #08090a !important;
+  color: #ffffff !important;
   border: 0 !important;
   border-radius: 6px !important;
   font-weight: 510 !important;
@@ -713,14 +717,17 @@ button[class*="primary"], button.lg.primary, .gradio-container .primary {
   padding: 10px 16px !important;
   min-height: 38px !important;
   letter-spacing: -0.005em !important;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.08), 0 1px 2px rgba(0,0,0,0.35) !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.35) !important;
   transition: filter 120ms ease, transform 80ms ease !important;
 }
 button[class*="primary"]:hover { filter: brightness(1.06) !important; }
 button[class*="primary"]:active { transform: translateY(1px) !important; }
 
-/* Generic secondary buttons */
-button.secondary, .gradio-container button:not([class*="primary"]):not(.ws-pill):not(.ws-side-btn):not(.ws-nav-btn) {
+/* Generic secondary buttons — exclude chrome buttons (ws-pill, ws-side-btn,
+   ws-nav-btn) explicitly so the segmented control / sidebar can claim their
+   own visual treatment without specificity wars. */
+button.secondary:not(.ws-pill):not(.ws-side-btn):not(.ws-nav-btn),
+.gradio-container button:not([class*="primary"]):not(.ws-pill):not(.ws-side-btn):not(.ws-nav-btn) {
   background: var(--ws-surface-2) !important;
   color: var(--ws-fg-dim) !important;
   border: 1px solid var(--ws-border) !important;
@@ -798,6 +805,73 @@ button.secondary, .gradio-container button:not([class*="primary"]):not(.ws-pill)
 /* ─── Gradio body row layout glue ──────────────────────────────────── */
 #ws-body { gap: 0 !important; align-items: stretch !important; }
 #ws-body > * { background: transparent !important; }
+
+/* ─── Mode panel show/hide — driven purely by JS class toggle ──────────
+   All 10 panels are mounted with `visible=True` (Gradio never touches
+   their display). JS adds `ws-mode-panel-active` to the chosen one. */
+.ws-mode-panel {
+  display: none !important;
+}
+.ws-mode-panel.ws-mode-panel-active {
+  display: flex !important;  /* gr.Column renders as flex column by default */
+  flex-direction: column !important;
+}
+
+/* ─── Inline code chips inside mode-title headings ────────────────────
+   Backticks were rendering as bordered pills sized to the 22px heading,
+   which made S2V/TI2V titles look broken. Render them as plain text. */
+#ws-content .mode-title code,
+#ws-content h2 code,
+#ws-content h2 :is(code, kbd, samp) {
+  background: transparent !important;
+  border: 0 !important;
+  font-size: inherit !important;
+  font-family: inherit !important;
+  padding: 0 !important;
+  color: inherit !important;
+  border-radius: 0 !important;
+}
+
+/* ─── Gallery (read-only display, not upload zone) ─────────────────────
+   `interactive=False` already hides the upload affordance, but suppress
+   any lingering "Drop Media Here" overlay defensively. */
+.ws-gallery-readonly [data-testid="upload-button"],
+.ws-gallery-readonly .upload-container,
+.ws-gallery-readonly .upload-button,
+.ws-gallery-readonly button.upload,
+.ws-gallery-readonly .icon-button-wrapper.upload-button-wrapper {
+  display: none !important;
+}
+.ws-gallery-empty {
+  color: var(--ws-fg-muted) !important;
+  font-size: 12.5px !important;
+  font-style: italic !important;
+  padding: 4px 2px 8px 2px !important;
+}
+
+/* ─── Preset pill specificity overrides ────────────────────────────────
+   gr.Button defaults to variant="secondary", which lands `class="secondary"`
+   on the rendered <button>. The generic `button.secondary` rule earlier in
+   this stylesheet beats our `button.ws-pill` rule on specificity ties (both
+   0,1,1) by source order. We bump specificity with `.gradio-container`
+   prefix (0,2,1) so the segmented-control state is unambiguous. */
+.gradio-container button.ws-pill {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: var(--ws-fg-muted) !important;
+  box-shadow: none !important;
+}
+.gradio-container button.ws-pill:hover:not(.ws-pill-active) {
+  background: transparent !important;
+  color: var(--ws-fg-dim) !important;
+  border-color: transparent !important;
+}
+.gradio-container button.ws-pill.ws-pill-active {
+  background: rgba(94, 132, 255, 0.18) !important;
+  color: #ffffff !important;
+  box-shadow: inset 0 0 0 1px #5e84ff !important;
+  border-color: #5e84ff !important;
+}
 """
 
 
@@ -828,67 +902,57 @@ def build() -> gr.Blocks:
                     )
                 tabs = build_all_tabs()
 
-        # ── Tab visibility wiring ────────────────────────────────────────
-        all_tab_keys = [
-            "t2v", "i2v", "ti2v", "flf2v", "v2v", "vace", "s2v", "animate",
-            "gallery", "settings",
-        ]
-
-        def _show_only(key: str):
-            return [gr.update(visible=(k == key)) for k in all_tab_keys]
-
-        # Active-mode highlight for sidebar buttons.
-        all_side_keys = list(all_tab_keys)  # mode-* sidebar buttons cover all keys
-
-        def _highlight(active_key: str):
-            updates = []
-            for k in all_side_keys:
-                if k == active_key:
-                    updates.append(gr.update(elem_classes=["ws-side-btn", "ws-side-btn-active"]))
-                else:
-                    updates.append(gr.update(elem_classes=["ws-side-btn"]))
-            return updates
-
-        sidebar_button_components = [
-            sidebar[f"mode_{k}"] if f"mode_{k}" in sidebar else
-            (sidebar["gallery_btn"] if k == "gallery" else sidebar["settings_btn"])
-            for k in all_side_keys
-        ]
-
-        # Mode buttons
-        for mode_key, _ in MODE_PILLS:
-            def _on_mode_click(mk=mode_key):
-                return (*_show_only(mk), *_highlight(mk))
-            sidebar[f"mode_{mode_key}"].click(
-                fn=_on_mode_click,
-                outputs=(
-                    [tabs[k]["tab"] for k in all_tab_keys]
-                    + sidebar_button_components
-                ),
-            )
-
-        # Gallery + Settings (sidebar + header)
-        def _go(key: str):
-            def _fn():
-                return (*_show_only(key), *_highlight(key))
-            return _fn
-
-        sidebar["gallery_btn"].click(
-            fn=_go("gallery"),
-            outputs=[tabs[k]["tab"] for k in all_tab_keys] + sidebar_button_components,
-        )
-        sidebar["settings_btn"].click(
-            fn=_go("settings"),
-            outputs=[tabs[k]["tab"] for k in all_tab_keys] + sidebar_button_components,
-        )
-        header["history_btn"].click(
-            fn=_go("gallery"),
-            outputs=[tabs[k]["tab"] for k in all_tab_keys] + sidebar_button_components,
-        )
-        header["settings_btn"].click(
-            fn=_go("settings"),
-            outputs=[tabs[k]["tab"] for k in all_tab_keys] + sidebar_button_components,
-        )
+        # ── Tab navigation — 100% client-side ────────────────────────────
+        # Round-1 fix: the original cascade (10× gr.update(visible=...) per
+        # click) crashed Svelte with effect_update_depth_exceeded. Switching
+        # to `gr.Tabs` didn't help — its internal Svelte machinery has the
+        # same N-update fan-out when `selected` changes. So we drop ALL
+        # Gradio-backed navigation and toggle visibility purely in the DOM:
+        #   - Every panel is mounted with `visible=True` and class
+        #     `ws-mode-panel`. T2V also has `ws-mode-panel-active`.
+        #   - CSS hides `.ws-mode-panel:not(.ws-mode-panel-active)`.
+        #   - A small JS listener moves the active class on sidebar clicks.
+        # Result: each sidebar click is exactly ZERO Gradio backend calls.
+        #
+        # Gradio strips <script> from gr.HTML, so we inject via demo.load(js=).
+        _NAV_JS = """
+        () => {
+          if (window.__wsNavBound) { return []; }
+          window.__wsNavBound = true;
+          var MODE_KEYS = ['t2v','i2v','ti2v','flf2v','v2v','vace','s2v','animate','gallery','settings'];
+          function setActive(key) {
+            if (MODE_KEYS.indexOf(key) === -1) return;
+            document.querySelectorAll('.ws-side-btn').forEach(function(b) {
+              b.classList.remove('ws-side-btn-active');
+            });
+            document.querySelectorAll('.ws-mode-panel').forEach(function(p) {
+              p.classList.remove('ws-mode-panel-active');
+            });
+            var sideId = (key === 'gallery') ? 'ws-mode-gallery'
+                       : (key === 'settings') ? 'ws-mode-settings'
+                       : 'ws-mode-' + key;
+            var side = document.getElementById(sideId);
+            if (side) side.classList.add('ws-side-btn-active');
+            var panel = document.getElementById('tab-' + key);
+            if (panel) panel.classList.add('ws-mode-panel-active');
+          }
+          var sidebar = document.getElementById('ws-sidebar');
+          if (sidebar) {
+            sidebar.addEventListener('click', function(e) {
+              var btn = e.target.closest('.ws-side-btn');
+              if (!btn) return;
+              var m = (btn.id || '').match(/^ws-mode-(.+)$/);
+              if (m) setActive(m[1]);
+            });
+          }
+          var hist = document.getElementById('ws-history-btn');
+          var sett = document.getElementById('ws-settings-btn');
+          if (hist) hist.addEventListener('click', function(){ setActive('gallery'); });
+          if (sett) sett.addEventListener('click', function(){ setActive('settings'); });
+          setActive('t2v');
+          return [];
+        }
+        """
 
         # ── Preset pill toggle (no gr.Radio in chrome) ───────────────────
         def _set_preset(value: str):
@@ -950,6 +1014,8 @@ def build() -> gr.Blocks:
             inputs=[header["generation"], header["preset_state"]],
             outputs=[tabs["settings"]["about"]],
         )
+        # Bind the client-side nav handler once the DOM is up.
+        demo.load(fn=None, inputs=None, outputs=None, js=_NAV_JS)
 
     return demo
 
