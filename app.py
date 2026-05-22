@@ -1186,6 +1186,8 @@ def build() -> gr.Blocks:
     with gr.Blocks(
         title="Wan Studio — Linear",
         analytics_enabled=False,
+        theme=THEME,
+        css=CSS,
     ) as demo:
         # ── Header ───────────────────────────────────────────────────────
         header = build_header()
@@ -1396,8 +1398,6 @@ def main():
         server_name="0.0.0.0",
         server_port=port,
         show_error=True,
-        theme=THEME,
-        css=CSS,
     )
 
 
