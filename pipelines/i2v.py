@@ -64,7 +64,16 @@ class I2VHandle(WanModelHandle):
         else:
             pipe = WanImageToVideoPipeline.from_pretrained(path, **common_kwargs)
 
-        pipe.to(backend.device)
+        # Wan 2.2 MoE I2V carries two 14B transformers + image encoder which
+        # won't fit on a `large` ZeroGPU card (48 GB). Use accelerate's model
+        # CPU offload to swap modules between CPU and GPU per forward pass.
+        # `enable_model_cpu_offload()` is CUDA-only — fall back to plain
+        # `.to(device)` on MPS / CPU. Once offload is enabled the pipe MUST
+        # NOT be moved with .to() afterwards.
+        if self.card.is_moe and backend.device == "cuda":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(backend.device)
         return pipe
 
     def generate(

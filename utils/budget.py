@@ -17,6 +17,15 @@ Size = Literal["large", "xlarge"]
 
 
 # (size, default_seconds_at_fast_preset)
+#
+# NOTE on size tier: `xlarge` requires HF PRO+ or Enterprise.
+# Phase 1 ships on HF PRO, so every entry is capped to `large` (48 GB) — the
+# HF /schedule server returns 422 Unprocessable Entity if a PRO account asks
+# for `xlarge`. Wan 2.2 MoE (dual 14B transformer + transformer_2 at bf16 ≈
+# 56 GB raw) doesn't fit in 48 GB unaided, so the MoE pipelines must also
+# enable `pipe.enable_model_cpu_offload()` (see pipelines/t2v.py +
+# pipelines/i2v.py). When this Space upgrades to PRO+, flip the MoE rows back
+# to `xlarge` and drop the offload branch.
 MODE_BUDGET: dict[str, tuple[Size, int]] = {
     # Wan 2.1 — all single-transformer
     "wan2.1_t2v_1.3b":         ("large",  60),
@@ -26,12 +35,12 @@ MODE_BUDGET: dict[str, tuple[Size, int]] = {
     "wan2.1_flf2v_14b_720p":   ("large", 150),
     "wan2.1_vace_1.3b":        ("large", 150),
     "wan2.1_vace_14b":         ("large", 180),
-    # Wan 2.2 — MoE goes xlarge for bf16 fit
+    # Wan 2.2 — MoE held at `large` for HF PRO compat; needs model CPU offload.
     "wan2.2_ti2v_5b":          ("large",  60),
-    "wan2.2_t2v_a14b":         ("xlarge", 120),
-    "wan2.2_i2v_a14b":         ("xlarge", 150),
+    "wan2.2_t2v_a14b":         ("large", 120),
+    "wan2.2_i2v_a14b":         ("large", 150),
     "wan2.2_s2v_14b":          ("large", 240),
-    "wan2.2_animate_14b":      ("xlarge", 300),
+    "wan2.2_animate_14b":      ("large", 300),
 }
 
 

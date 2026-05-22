@@ -35,11 +35,18 @@ def test_mode_budget_has_all_phase1_modes():
         assert key in MODE_BUDGET, f"missing budget for {key}"
 
 
-def test_moe_modes_route_to_xlarge():
-    """Wan 2.2 A14B MoE must use xlarge per RESEARCH §6.3."""
+def test_moe_modes_route_to_large_on_pro_tier():
+    """Wan 2.2 A14B MoE is held at `large` while this Space is on HF PRO.
+
+    `xlarge` requires HF PRO+ / Enterprise; PRO accounts get a 422 from
+    /schedule. MoE pipelines compensate by calling
+    `pipe.enable_model_cpu_offload()` to fit in 48 GB (see pipelines/t2v.py
+    and pipelines/i2v.py). When the Space upgrades to PRO+, this expectation
+    should flip back to `xlarge` and the offload branch should be removed.
+    """
     for key in ("wan2.2_t2v_a14b", "wan2.2_i2v_a14b"):
         size, _ = MODE_BUDGET[key]
-        assert size == "xlarge", f"{key} should route to xlarge"
+        assert size == "large", f"{key} must route to large on PRO tier (xlarge → 422)"
 
 
 def test_small_modes_route_to_large():
