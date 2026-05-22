@@ -1393,7 +1393,10 @@ def build() -> gr.Blocks:
 
 def main():
     demo = build()
-    port = int(os.environ.get("WAN_STUDIO_PORT", "7863"))
+    # On HF Spaces the public health-check expects port 7860 (gradio default).
+    # Locally we use 7863 so we don't clash with other Gradio dev servers.
+    default_port = "7860" if os.environ.get("SPACE_ID") else "7863"
+    port = int(os.environ.get("WAN_STUDIO_PORT", default_port))
     demo.queue(max_size=20, default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=port,
