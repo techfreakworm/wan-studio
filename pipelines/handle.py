@@ -97,6 +97,7 @@ class WanModelHandle:
         self.pipe: Any = None  # set in ensure_loaded
         self.lora_loaded: bool = False
         self.current_preset: Preset | None = None
+        self.cuda_attached: bool = False  # set by ensure_cuda_attached (inside @spaces.GPU)
 
     @classmethod
     def for_key(cls, key: str) -> "WanModelHandle":
@@ -106,7 +107,11 @@ class WanModelHandle:
         return cls(BY_KEY[key])
 
     def ensure_loaded(self) -> None:
-        """Build the pipeline + attach Lightning LoRA if available. Idempotent."""
+        """Build the pipeline + attach Lightning LoRA. Loads into CPU RAM only.
+
+        Safe to call in main process at app startup (before any @spaces.GPU
+        worker exists). The CUDA dance happens lazily in ensure_cuda_attached.
+        """
         if self.pipe is not None:
             return
         self.pipe = self._build_pipeline()
@@ -115,9 +120,28 @@ class WanModelHandle:
             self._load_lightning_lora()
             self.lora_loaded = True
 
+    def ensure_cuda_attached(self) -> None:
+        """Move the loaded pipeline to GPU. MUST be called from inside @spaces.GPU.
+
+        On MoE cards we use accelerate's model_cpu_offload hooks so the two
+        14B transformers fit on the 48 GB `large` slice. On single-transformer
+        cards we just `.to(device)`. Idempotent — re-entry from a warm worker
+        is a no-op.
+        """
+        if self.cuda_attached:
+            return
+        import torch
+        backend = detect()
+        if self.card.is_moe and torch.cuda.is_available():
+            self.pipe.enable_model_cpu_offload()
+        else:
+            self.pipe.to(backend.device)
+        self.cuda_attached = True
+
     def configure_preset(self, preset: Preset) -> PresetKwargs:
         """Apply Fast/Quality preset; return inference kwargs."""
         self.ensure_loaded()
+        self.ensure_cuda_attached()
         kwargs = resolve(self.card, preset)
 
         if not self.lora_loaded:

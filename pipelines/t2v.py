@@ -18,6 +18,13 @@ class T2VHandle(WanModelHandle):
     """Builds WanPipeline. For MoE cards, also loads transformer_2."""
 
     def _build_pipeline(self) -> Any:
+        """Build pipeline into CPU RAM. CUDA attach happens in handle.ensure_cuda_attached.
+
+        Splitting load-from-disk from move-to-GPU lets us preload the model
+        in the main process at app startup so each @spaces.GPU worker fork
+        inherits the loaded weights for free (copy-on-write) instead of
+        paying ~120s of disk-to-RAM load inside the GPU duration budget.
+        """
         backend = detect()
         path = _mount_path(self.card)
 
@@ -44,17 +51,6 @@ class T2VHandle(WanModelHandle):
                 text_encoder=shared.text_encoder(),
                 torch_dtype=backend.dtype,
             )
-
-        # Wan 2.2 MoE carries two 14B transformers (~56 GB at bf16) which won't
-        # fit on a `large` ZeroGPU card (48 GB). Use accelerate's model CPU
-        # offload to swap experts between CPU and GPU per forward pass.
-        # `enable_model_cpu_offload()` is CUDA-only — fall back to plain
-        # `.to(device)` on MPS / CPU. Also: once offload is enabled the pipe
-        # MUST NOT be moved with .to() afterwards.
-        if self.card.is_moe and backend.device == "cuda":
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to(backend.device)
         return pipe
 
     def generate(

@@ -98,8 +98,32 @@ def _predownload_wan22_t2v() -> None:
         traceback.print_exc()
 
 
+# ── Preload the default T2V handle into CPU RAM at app startup ─────────
+# Worker forks inherit this via copy-on-write so each @spaces.GPU click
+# skips the ~120s of disk-to-RAM shard load that was blowing the GPU
+# duration budget and getting workers killed mid-load.
+def _preload_default_t2v_handle() -> None:
+    if os.getenv("SPACES_ZERO_GPU") is None:
+        return
+    try:
+        from pipelines.t2v import T2VHandle
+        import time as _t
+        key = "wan2.2_t2v_a14b"
+        print(f"=== PRELOAD T2V handle to CPU: {key} ===", flush=True)
+        t0 = _t.time()
+        handle = T2VHandle.for_key(key)
+        handle.ensure_loaded()  # disk → CPU RAM only (no CUDA touch)
+        T2V_HANDLES[key] = handle
+        print(f"=== PRELOAD done in {int(_t.time()-t0)}s — handle cached ===", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"=== PRELOAD FAILED: {type(e).__name__}: {e} ===", flush=True)
+        traceback.print_exc()
+
+
 _probe_filesystem()
 _predownload_wan22_t2v()
+_preload_default_t2v_handle()
 
 
 
