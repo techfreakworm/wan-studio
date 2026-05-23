@@ -71,37 +71,38 @@ def _probe_filesystem() -> None:
     print("=== END FS PROBE ===", flush=True)
 
 
-# ── Explicit pre-download + local-path stash ───────────────────────────
-# Returns the snapshot dir so we can pass it directly to from_pretrained
-# (bypassing diffusers' snapshot_download cache-revalidation path inside
-# the forked ZeroGPU worker).
-def _predownload_wan22_t2v() -> None:
+# ── Stitch the Wan 2.2 T2V dir at startup ──────────────────────────────
+# Combines the read-only /models/<slug>/ volume mount (weights) with
+# bundled models_meta/<slug>/ JSONs (correct configs — mount truncates
+# small text files). Result is a /tmp/wan-stitched/<slug>/ dir that
+# from_pretrained can read directly. Zero downloads, zero container disk
+# for weights — they're symlinks pointing into the read-only mount.
+def _stitch_default_model() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
-    repo = "techfreakworm/wan2.2-t2v-a14b"
     try:
-        from huggingface_hub import snapshot_download
+        from pipelines.handle import stitch_local_dir
+        from pipelines.registry import BY_KEY
         import time as _t
-        print(f"=== PREDOWNLOAD {repo} → {os.environ.get('HF_HUB_CACHE')} ===", flush=True)
+        key = "wan2.2_t2v_a14b"
+        print(f"=== STITCH {key} ===", flush=True)
         t0 = _t.time()
-        path = snapshot_download(repo_id=repo, repo_type="model")
-        print(f"=== PREDOWNLOAD done in {int(_t.time()-t0)}s → {path} ===", flush=True)
-        # Stash the local snapshot path in env for handle.py to consume.
-        # Passing a local path to from_pretrained skips the snapshot_download
-        # cache-validation path that's been triggering re-downloads inside
-        # the ZeroGPU worker fork.
-        os.environ["WAN_STUDIO_WAN22_T2V_LOCAL_PATH"] = path
-        print(f"=== WAN_STUDIO_WAN22_T2V_LOCAL_PATH set ===", flush=True)
+        path = stitch_local_dir(BY_KEY[key])
+        if path:
+            print(f"=== STITCH done in {int(_t.time()-t0)}s → {path} ===", flush=True)
+        else:
+            print(f"=== STITCH SKIPPED ({key} mount or meta missing) ===", flush=True)
     except Exception as e:
         import traceback
-        print(f"=== PREDOWNLOAD FAILED: {type(e).__name__}: {e} ===", flush=True)
+        print(f"=== STITCH FAILED: {type(e).__name__}: {e} ===", flush=True)
         traceback.print_exc()
 
 
 # ── Preload the default T2V handle into CPU RAM at app startup ─────────
 # Worker forks inherit this via copy-on-write so each @spaces.GPU click
 # skips the ~120s of disk-to-RAM shard load that was blowing the GPU
-# duration budget and getting workers killed mid-load.
+# duration budget. Reads from the stitched dir built above — instant,
+# no network, no disk pressure.
 def _preload_default_t2v_handle() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
@@ -122,7 +123,7 @@ def _preload_default_t2v_handle() -> None:
 
 
 _probe_filesystem()
-_predownload_wan22_t2v()
+_stitch_default_model()
 _preload_default_t2v_handle()
 
 

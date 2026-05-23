@@ -11,6 +11,7 @@ Only ONE handle's pipeline lives on GPU at a time (managed by app.py orchestrato
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,21 @@ from utils.backend import detect
 # Locally (MPS dev), fall back to standard HF cache.
 SPACE_MOUNT_ROOT = Path(os.getenv("WAN_STUDIO_MOUNT_ROOT", "/models"))
 
+# Bundled metadata (configs, tokenizer, .safetensors.index.json) shipped with
+# the Space repo itself. Working around an HF Volume bug where small JSON
+# files mount truncated — transformer/config.json shows 290B instead of 495B.
+# We ship correct copies of every small file here (~21 MB for tokenizer).
+META_ROOT = Path(__file__).parent.parent / "models_meta"
+
+# Stitched dirs combine mounted weights (read-only mount, no disk cost) with
+# bundled metadata (writable /tmp copy). One per slug. Built lazily on first
+# call to stitch_local_dir. Symlinks for big files = ~0 disk cost.
+STITCH_ROOT = Path("/tmp/wan-stitched")
+
+# File extensions classified as "weights" — symlinked from the mount.
+# Everything else (json/txt/md/etc.) is copied from META_ROOT or skipped.
+WEIGHT_EXTS = (".safetensors", ".bin", ".pth", ".pt", ".onnx", ".gguf", ".ckpt")
+
 
 def _slug_for(card: ModelCard) -> str:
     """Compute the directory slug used for the duplicated mirror.
@@ -38,32 +54,71 @@ def _slug_for(card: ModelCard) -> str:
     return card.key.replace("_", "-")
 
 
-_LOCAL_PATH_ENV: dict[str, str] = {
-    "wan2.2_t2v_a14b": "WAN_STUDIO_WAN22_T2V_LOCAL_PATH",
-    "wan2.1_t2v_14b": "WAN_STUDIO_WAN21_T2V_LOCAL_PATH",
-    "wan2.2_i2v_a14b": "WAN_STUDIO_WAN22_I2V_LOCAL_PATH",
-    "wan2.1_i2v_14b_480p": "WAN_STUDIO_WAN21_I2V_480_LOCAL_PATH",
-    "wan2.1_i2v_14b_720p": "WAN_STUDIO_WAN21_I2V_720_LOCAL_PATH",
-}
+def stitch_local_dir(card: ModelCard) -> str | None:
+    """Build a stitched local dir = mounted weights + bundled JSONs.
+
+    Returns the stitched dir path, or None if either the mount or the
+    bundled metadata is missing (e.g. local MPS dev — no /models mount).
+
+    Idempotent: a marker file guards against re-stitching. Once stitched,
+    subsequent calls return the path immediately.
+
+    Big binary files (`.safetensors` etc.) are SYMLINKED from the mount
+    so they cost zero disk on the container's writable layer (the entire
+    point of using space_volumes for model weights). Small text files
+    (JSONs, tokenizer files) are COPIED from `models_meta/<slug>/` because
+    the volume mount serves truncated copies of them.
+    """
+    slug = _slug_for(card)
+    mount = SPACE_MOUNT_ROOT / slug
+    meta = META_ROOT / slug
+    stitched = STITCH_ROOT / slug
+
+    if not mount.exists() or not meta.exists():
+        return None
+
+    marker = stitched / ".wan_studio_stitched"
+    if marker.exists():
+        return str(stitched)
+
+    stitched.mkdir(parents=True, exist_ok=True)
+
+    # Copy bundled small files first (configs, tokenizer, safetensors.index.json).
+    for src in meta.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(meta)
+        dst = stitched / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.exists():
+            shutil.copy2(src, dst)
+
+    # Symlink large weight files from the mount.
+    for src in mount.rglob("*"):
+        if not src.is_file() or src.suffix.lower() not in WEIGHT_EXTS:
+            continue
+        rel = src.relative_to(mount)
+        dst = stitched / rel
+        if dst.exists() or dst.is_symlink():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(src, dst)
+
+    marker.touch()
+    return str(stitched)
 
 
 def _mount_path(card: ModelCard) -> str:
     """Resolve where the checkpoint lives for from_pretrained().
 
-    1. If app.py has stashed a LOCAL_PATH env var (via predownload), use that
-       directly. Passing a local path to from_pretrained sidesteps diffusers'
-       snapshot_download cache-revalidation, which has been re-fetching shards
-       inside the ZeroGPU worker fork even though the parent process cached
-       them. Critical fix.
-    2. Otherwise return the mirror repo ID. HF Volume mounts truncate small
-       JSON files (transformer/config.json comes back 290B vs 495B on the
-       real repo), so we bypass mounts entirely for base models.
+    Priority:
+      1. Stitched local dir (mount + bundled metadata) — zero disk cost
+         on ZeroGPU, big files served via the read-only volume mount.
+      2. Upstream mirror repo ID — local MPS dev or when stitching fails.
     """
-    env_var = _LOCAL_PATH_ENV.get(card.key)
-    if env_var:
-        local = os.getenv(env_var)
-        if local and Path(local).is_dir():
-            return local
+    stitched = stitch_local_dir(card)
+    if stitched:
+        return stitched
     return card.repo
 
 
