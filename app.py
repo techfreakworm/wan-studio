@@ -94,27 +94,20 @@ def _parse_resolution(label: str) -> tuple[int, int]:
     return h, w
 
 
-# --- @spaces.GPU(duration=..., size=...) callables.  These MUST share the
-# wrapped function's signature (Spaces inspects bound args to call them).
+# --- @spaces.GPU(duration=callable) — duration is dynamic per-args, but size
+# MUST be a static literal ('large' | 'xlarge'). Passing a callable for size
+# silently serializes the function object into the /schedule POST body and HF
+# rejects with 422. Both T2V + I2V modes are bounded to 'large' on PRO tier
+# (utils.budget.MODE_BUDGET) so we hard-code 'large' on the decorator below.
 
 def _get_t2v_duration(prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
     from utils.budget import duration_for
     return duration_for(_t2v_key_for(generation), duration_s=float(duration_s or 3.0))
 
 
-def _get_t2v_size(prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
-    from utils.budget import size_for
-    return size_for(_t2v_key_for(generation))
-
-
 def _get_i2v_duration(image, prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
     from utils.budget import duration_for
     return duration_for(_i2v_key_for(generation, resolution_label), duration_s=float(duration_s or 3.0))
-
-
-def _get_i2v_size(image, prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
-    from utils.budget import size_for
-    return size_for(_i2v_key_for(generation, resolution_label))
 
 
 def _coerce_preset(preset_label: str) -> str:
@@ -146,7 +139,7 @@ def _build_t2v_handler():
     """
     from utils.backend import spaces_gpu_or_noop
 
-    @spaces_gpu_or_noop()(duration=_get_t2v_duration, size=_get_t2v_size)
+    @spaces_gpu_or_noop()(duration=_get_t2v_duration, size="large")
     def generate_t2v(
         prompt: str,
         generation: str,
@@ -229,7 +222,7 @@ def _build_i2v_handler():
     checkpoint by (generation × resolution) and coerces filepath → PIL.Image."""
     from utils.backend import spaces_gpu_or_noop
 
-    @spaces_gpu_or_noop()(duration=_get_i2v_duration, size=_get_i2v_size)
+    @spaces_gpu_or_noop()(duration=_get_i2v_duration, size="large")
     def generate_i2v(
         image,
         prompt: str,
@@ -1059,6 +1052,43 @@ button.secondary:not(.ws-pill):not(.ws-side-btn):not(.ws-nav-btn),
   font-size: 12px !important;
 }
 
+/* ─── Dev banner (top of page, all viewports) ─────────────────────── */
+.ws-dev-banner {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 10px !important;
+  padding: 9px 16px !important;
+  background: linear-gradient(180deg, #2d2418 0%, #261f15 100%) !important;
+  border-bottom: 1px solid #5a4520 !important;
+  color: #f1b863 !important;
+  font-family: "Geist", "Inter", ui-sans-serif, system-ui, sans-serif !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  text-align: center !important;
+  line-height: 1.4 !important;
+}
+.ws-dev-banner .ws-dev-icon {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #f1b863;
+  box-shadow: 0 0 0 3px rgba(241,184,99,0.18);
+  flex-shrink: 0;
+}
+.ws-dev-banner b { color: #ffd494 !important; font-weight: 600 !important; }
+.ws-dev-banner a {
+  color: #ffd494 !important;
+  text-decoration: underline !important;
+  text-decoration-color: rgba(255,212,148,0.4) !important;
+  text-underline-offset: 2px !important;
+}
+.ws-dev-banner a:hover { text-decoration-color: #ffd494 !important; }
+@media (max-width: 767px) {
+  .ws-dev-banner { font-size: 11.5px !important; padding: 8px 12px !important; }
+}
+
 /* ─── Local backend banner ─────────────────────────────────────────── */
 .ws-local-banner {
   display: inline-flex !important;
@@ -1445,6 +1475,18 @@ def build() -> gr.Blocks:
         theme=THEME,
         css=CSS,
     ) as demo:
+        # ── Dev banner (top of every page) ───────────────────────────────
+        gr.HTML(
+            '<div class="ws-dev-banner">'
+            '<span class="ws-dev-icon"></span>'
+            '<span><b>Wan Studio is in active development.</b> '
+            'Please don\'t run inference — every GPU click burns the maintainer\'s '
+            'ZeroGPU quota. Follow along at '
+            '<a href="https://github.com/techfreakworm/wan-studio" target="_blank" rel="noopener">github.com/techfreakworm/wan-studio</a>.'
+            '</span></div>',
+            elem_id="ws-dev-banner",
+        )
+
         # ── Header ───────────────────────────────────────────────────────
         header = build_header()
 
