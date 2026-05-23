@@ -13,9 +13,20 @@ def build_header() -> dict:
     with gr.Row(elem_id="ws-header", elem_classes=["ws-header-row"]):
         # ── Brand mark ────────────────────────────────────────────────────
         with gr.Column(scale=1, min_width=240, elem_classes=["ws-chrome-col", "ws-brand-col"]):
+            # Brand + hamburger live together so the mobile drawer trigger
+            # sits naturally to the left of the monogram. The hamburger is
+            # hidden via CSS on desktop (≥1024px); click is wired in the
+            # nav-JS block in app.py (no Gradio event handler).
             gr.HTML(
                 """
                 <div class="ws-brand">
+                  <button class="ws-hamburger" id="ws-hamburger" type="button" aria-label="Open menu" aria-controls="ws-sidebar">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                      <line x1="3" y1="6" x2="21" y2="6"/>
+                      <line x1="3" y1="12" x2="21" y2="12"/>
+                      <line x1="3" y1="18" x2="21" y2="18"/>
+                    </svg>
+                  </button>
                   <div class="ws-brand-mark"></div>
                   <div class="ws-brand-text">
                     <span class="ws-brand-name">Wan Studio</span>

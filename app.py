@@ -1177,6 +1177,262 @@ button.secondary:not(.ws-pill):not(.ws-side-btn):not(.ws-nav-btn),
   box-shadow: inset 0 0 0 1px #5e84ff !important;
   border-color: #5e84ff !important;
 }
+
+/* ─── Hamburger (drawer trigger) ─────────────────────────────────────
+   Lives inside `.ws-brand` and is hidden on desktop. Made visible at
+   ≤767px below. Styled to match the brand restraint (no fill, just a
+   subtle hairline + the icon). */
+.ws-hamburger {
+  display: none;
+  background: transparent;
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+  color: var(--ws-fg-dim);
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  margin-right: 8px;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  flex-shrink: 0;
+}
+.ws-hamburger:hover {
+  background: var(--ws-surface-2);
+  border-color: var(--ws-border-strong);
+  color: var(--ws-fg);
+}
+.ws-hamburger:active { transform: translateY(1px); }
+
+/* Backdrop covers main content when drawer is open. Injected via JS,
+   so it always exists in the DOM but is only interactive when the
+   drawer is open. Hidden on desktop unconditionally. */
+.ws-sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 150;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease-out;
+  display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Responsive: tablet (≤1023px) — extend the Linear aesthetic, narrow
+   the chrome, drop secondary affordances. The desktop styles above are
+   the source of truth — these rules ONLY override the bits that don't
+   work on smaller screens.
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 1023px) {
+  /* Brand: keep the name, drop the subtitle (frees the brand column). */
+  .ws-brand-sub { display: none !important; }
+  .ws-chrome-col.ws-brand-col { min-width: 0 !important; }
+
+  /* Sidebar narrows: 248 → 200 px. */
+  #ws-sidebar {
+    min-width: 200px !important;
+    padding: 14px 10px !important;
+  }
+  button.ws-side-btn { padding: 6px 10px 6px 20px !important; }
+
+  /* Header: tighter gaps, slightly shorter. */
+  #ws-header {
+    gap: 14px !important;
+    padding: 8px 16px !important;
+    min-height: 56px !important;
+  }
+
+  /* Nav buttons collapse to icon-only via a leading dot marker
+     (Linear's restrained "●" pattern). The labels stay readable for
+     assistive tech but visually hidden. */
+  button.ws-nav-btn {
+    padding: 5px 10px !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+    min-width: 32px !important;
+  }
+  button.ws-nav-btn::before {
+    content: "●" !important;
+    display: inline-block !important;
+    font-size: 10px !important;
+    line-height: 1 !important;
+    color: var(--ws-fg-muted) !important;
+  }
+  button.ws-nav-btn:hover::before { color: var(--ws-fg) !important; }
+
+  /* Tighter tab content padding (32 → 20). */
+  #ws-content { padding: 20px 20px !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Responsive: mobile (≤767px) — sidebar becomes an overlay drawer,
+   header collapses to monogram + hamburger, input/output stack to a
+   single column.
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 767px) {
+  /* ── Header: 48px, brand collapses to monogram only. ───────────── */
+  #ws-header {
+    min-height: 48px !important;
+    padding: 6px 12px !important;
+    gap: 10px !important;
+    flex-wrap: wrap !important;
+    row-gap: 6px !important;
+  }
+  .ws-brand-text { display: none !important; }
+  .ws-brand { gap: 0 !important; }
+
+  /* Hamburger visible on mobile, sits left of brand mark. */
+  .ws-hamburger { display: inline-flex !important; }
+
+  /* Brand column shrinks; generation + preset wrap to a second row
+     beneath the brand on mobile (header flex-wraps). */
+  .ws-chrome-col.ws-brand-col {
+    min-width: 0 !important;
+    flex: 0 0 auto !important;
+  }
+  .ws-chrome-col {
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
+  }
+  .ws-chrome-right { flex: 0 0 auto !important; }
+
+  /* History/Settings move into the drawer footer; hide the chrome
+     versions on mobile. (Existing JS still wires the clicks via the
+     sidebar entries.) */
+  .ws-chrome-right { display: none !important; }
+
+  /* Generation dropdown + preset pills sit on the second row,
+     thumb-reachable. */
+  .ws-dropdown .wrap, .ws-dropdown .secondary-wrap, .ws-dropdown .container {
+    min-height: 40px !important;
+  }
+  .ws-dropdown input, .ws-dropdown .single-select, .ws-dropdown .token {
+    font-size: 14px !important;
+    padding: 8px 12px !important;
+  }
+  button.ws-pill {
+    min-height: 36px !important;
+    padding: 7px 16px !important;
+    font-size: 13px !important;
+  }
+
+  /* ── Sidebar becomes an overlay drawer ─────────────────────────── */
+  #ws-sidebar {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 280px !important;
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
+    z-index: 200 !important;
+    transform: translateX(-100%) !important;
+    transition: transform 200ms ease-out !important;
+    padding: 16px 12px !important;
+    background: #0a0b0d !important;
+    border-right: 1px solid var(--ws-border) !important;
+    overflow-y: auto !important;
+    /* Override the desktop `flex-shrink: 0` parent-row behavior — when
+       absolute-positioned the row no longer reserves space for us. */
+    flex-shrink: 0 !important;
+  }
+  /* IMPORTANT: Gradio injects a container-scoped copy of every CSS rule
+     prefixed with `.gradio-container... .contain`. That means
+     `body.X #Y` becomes `.contain body.X #Y`, which never matches because
+     `body` is ABOVE `.contain` in the DOM. So drawer-open state lives on
+     the sidebar element itself (and on the backdrop element itself),
+     which the JS toggles. The `body.ws-sidebar-open` rule outside the
+     media query is only used for the unprefixed-sheet scroll lock. */
+  #ws-sidebar.ws-open {
+    transform: translateX(0) !important;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+  }
+
+  /* Backdrop becomes interactive on mobile when drawer is open. */
+  .ws-sidebar-backdrop { display: block !important; }
+  .ws-sidebar-backdrop.ws-open {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
+  /* Drawer touch targets need to be larger. */
+  button.ws-side-btn {
+    min-height: 40px !important;
+    padding: 10px 10px 10px 24px !important;
+    font-size: 14px !important;
+  }
+  .ws-side-footer { display: none !important; }
+
+  /* ── Main content: stack to single column ─────────────────────── */
+  #ws-content {
+    padding: 16px !important;
+    min-height: calc(100vh - 48px) !important;
+  }
+  /* The `_two_col` Row in tabs.py uses default flex-row; flip to
+     column on mobile. Limit to direct rows inside an active panel
+     so we don't break inline rows (e.g. resolution + duration). */
+  #ws-content .ws-mode-panel > div > .row,
+  #ws-content .ws-mode-panel > .row {
+    flex-direction: column !important;
+  }
+  #ws-content .ws-mode-panel > div > .row > *,
+  #ws-content .ws-mode-panel > .row > * {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  /* Tab heading slightly smaller on mobile. */
+  #ws-content div[id^="tab-"] h2 {
+    font-size: 19px !important;
+    margin: 2px 0 16px 0 !important;
+    padding-bottom: 12px !important;
+  }
+
+  /* Tighten card padding inside tabs. */
+  #ws-content .block.padded:not(.hide-container) {
+    padding: 12px !important;
+  }
+
+  /* Generate CTA: large + tappable. */
+  #ws-content button.primary,
+  #ws-content button[class*="primary"] {
+    min-height: 48px !important;
+    font-size: 14px !important;
+    padding: 12px 18px !important;
+  }
+
+  /* Inputs inside tabs: bump touch sizing. */
+  .gradio-container input[type="text"],
+  .gradio-container input[type="number"],
+  .gradio-container textarea {
+    font-size: 14px !important;
+    padding: 10px 12px !important;
+  }
+
+  /* Resolution + duration row: keep inline on mobile (was already a
+     wrap row in tabs.py), but constrain to two columns. */
+  #ws-content .form .row {
+    flex-direction: column !important;
+    gap: 12px !important;
+  }
+  #ws-content .form .row > * { width: 100% !important; }
+
+  /* Local-backend banner shrinks. */
+  .ws-local-banner {
+    font-size: 10.5px !important;
+    padding: 5px 8px !important;
+  }
+
+  /* "Send to:" row stacks. */
+  #ws-content .ws-mode-panel .row .gradio-button.sm {
+    min-width: 0 !important;
+  }
+}
+
+/* iOS body-scroll lock: prevent rubber-band when drawer is open. */
+body.ws-sidebar-open { overflow: hidden !important; }
 """
 
 
@@ -1227,6 +1483,47 @@ def build() -> gr.Blocks:
           if (window.__wsNavBound) { return []; }
           window.__wsNavBound = true;
           var MODE_KEYS = ['t2v','i2v','ti2v','flf2v','v2v','vace','s2v','animate','gallery','settings'];
+
+          // ── Mobile drawer helpers ─────────────────────────────────────
+          // Injected backdrop covers main content when drawer is open.
+          // IMPORTANT: Must be appended INSIDE `.gradio-container` (or
+          // its `.contain` child) because Gradio prefixes CSS rules with
+          // `.gradio-container .contain` — anything outside that scope
+          // doesn't match the prefixed copy of our rules.
+          var backdropParent =
+              document.querySelector('.gradio-container .contain') ||
+              document.querySelector('.gradio-container') ||
+              document.body;
+          var backdrop = document.querySelector('.ws-sidebar-backdrop');
+          if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.className = 'ws-sidebar-backdrop';
+            backdrop.setAttribute('aria-hidden', 'true');
+            backdropParent.appendChild(backdrop);
+          }
+          // Drawer state lives on the sidebar + backdrop elements directly
+          // (Gradio prefixes every CSS selector with `.contain`, which breaks
+          // `body.X #Y` patterns since `body` is above `.contain`). We also
+          // mirror the state to body.ws-sidebar-open for the unprefixed
+          // scroll-lock rule.
+          function openDrawer() {
+            document.body.classList.add('ws-sidebar-open');
+            var sb = document.getElementById('ws-sidebar');
+            if (sb) sb.classList.add('ws-open');
+            if (backdrop) backdrop.classList.add('ws-open');
+          }
+          function closeDrawer() {
+            document.body.classList.remove('ws-sidebar-open');
+            var sb = document.getElementById('ws-sidebar');
+            if (sb) sb.classList.remove('ws-open');
+            if (backdrop) backdrop.classList.remove('ws-open');
+          }
+          function isDrawerOpen() {
+            var sb = document.getElementById('ws-sidebar');
+            return sb && sb.classList.contains('ws-open');
+          }
+          function isDrawerViewport() { return window.matchMedia('(max-width: 767px)').matches; }
+
           function setActive(key) {
             if (MODE_KEYS.indexOf(key) === -1) return;
             document.querySelectorAll('.ws-side-btn').forEach(function(b) {
@@ -1242,6 +1539,9 @@ def build() -> gr.Blocks:
             if (side) side.classList.add('ws-side-btn-active');
             var panel = document.getElementById('tab-' + key);
             if (panel) panel.classList.add('ws-mode-panel-active');
+            // On mobile, picking a mode collapses the drawer so the
+            // tab content is visible immediately. No-op at ≥768px.
+            if (isDrawerViewport()) closeDrawer();
           }
           var sidebar = document.getElementById('ws-sidebar');
           if (sidebar) {
@@ -1256,6 +1556,31 @@ def build() -> gr.Blocks:
           var sett = document.getElementById('ws-settings-btn');
           if (hist) hist.addEventListener('click', function(){ setActive('gallery'); });
           if (sett) sett.addEventListener('click', function(){ setActive('settings'); });
+
+          // ── Hamburger + backdrop click bindings ──────────────────────
+          var burger = document.getElementById('ws-hamburger');
+          if (burger) {
+            burger.addEventListener('click', function(e) {
+              e.preventDefault();
+              if (isDrawerOpen()) { closeDrawer(); } else { openDrawer(); }
+            });
+          }
+          backdrop.addEventListener('click', closeDrawer);
+          // Escape key closes the drawer (a11y nicety).
+          document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && isDrawerOpen()) {
+              closeDrawer();
+            }
+          });
+          // If the viewport grows past mobile while the drawer is open
+          // (rotation, devtools toggle), close it so the sticky desktop
+          // sidebar takes over cleanly.
+          window.addEventListener('resize', function() {
+            if (!isDrawerViewport() && isDrawerOpen()) {
+              closeDrawer();
+            }
+          });
+
           setActive('t2v');
           return [];
         }
