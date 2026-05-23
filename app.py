@@ -9,6 +9,21 @@ no-op toast until their pipelines are wired in later waves.
 """
 from __future__ import annotations
 
+# ── HF cache redirect (must precede every huggingface_hub touch) ────────
+# /home/user/.cache/ on ZeroGPU isn't owned by the runtime user (preload
+# daemon owns it) so xet_get / snapshot_download permission-deny on writes.
+# /tmp/hf_cache is world-writable. Space-level env vars are also set via
+# api.add_space_variable for redundancy — these defaults are a belt+braces.
+import os as _os
+_os.environ.setdefault("HF_HUB_CACHE", "/tmp/hf_cache")
+_os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
+_os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+_os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+try:
+    _os.makedirs("/tmp/hf_cache", exist_ok=True)
+except (PermissionError, OSError):
+    pass
+
 # IMPORTANT: import `spaces` BEFORE any CUDA-related package (torch, diffusers,
 # transformers, peft) so the ZeroGPU runtime can fork CUDA correctly.  Once
 # torch has touched CUDA, `import spaces` raises:
@@ -27,6 +42,55 @@ import gradio as gr
 from pipelines import modes_in
 from ui import build_all_tabs, build_header, build_sidebar, MODE_PILLS
 from utils import detect
+
+
+# ── Startup probe: log filesystem permissions for cache paths ───────────
+def _probe_filesystem() -> None:
+    if os.getenv("SPACES_ZERO_GPU") is None:
+        return
+    print(f"=== FS PROBE: uid={os.getuid()} gid={os.getgid()} ===", flush=True)
+    paths = ["/", "/tmp", "/home/user", "/home/user/.cache",
+             "/home/user/.cache/huggingface", "/home/user/app",
+             "/tmp/hf_cache", "/data", "/models",
+             "/models/wan-lightning-loras"]
+    for p in paths:
+        try:
+            st = os.stat(p)
+            owner = f"uid={st.st_uid} gid={st.st_gid} mode={oct(st.st_mode)[-3:]}"
+            try:
+                tmp = os.path.join(p, f".test_write_{os.getpid()}")
+                with open(tmp, "w") as f:
+                    f.write("ok")
+                os.unlink(tmp)
+                wr = "WRITABLE"
+            except (PermissionError, OSError) as e:
+                wr = f"NO-WRITE ({type(e).__name__})"
+            print(f"  {p:<45} {owner:<45} {wr}", flush=True)
+        except FileNotFoundError:
+            print(f"  {p:<45} NOT-FOUND", flush=True)
+    print("=== END FS PROBE ===", flush=True)
+
+
+# ── Explicit pre-download: foreground, controllable, visible logs ───────
+def _predownload_wan22_t2v() -> None:
+    if os.getenv("SPACES_ZERO_GPU") is None:
+        return
+    repo = "techfreakworm/wan2.2-t2v-a14b"
+    try:
+        from huggingface_hub import snapshot_download
+        import time as _t
+        print(f"=== PREDOWNLOAD {repo} → {os.environ.get('HF_HUB_CACHE')} ===", flush=True)
+        t0 = _t.time()
+        path = snapshot_download(repo_id=repo, repo_type="model")
+        print(f"=== PREDOWNLOAD done in {int(_t.time()-t0)}s → {path} ===", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"=== PREDOWNLOAD FAILED: {type(e).__name__}: {e} ===", flush=True)
+        traceback.print_exc()
+
+
+_probe_filesystem()
+_predownload_wan22_t2v()
 
 
 

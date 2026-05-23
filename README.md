@@ -10,15 +10,13 @@ pinned: false
 short_description: "Every Wan mode, one clean UI."
 python_version: "3.12.12"
 startup_duration_timeout: "30m"
-preload_from_hub:
-  - techfreakworm/wan-lightning-loras
-  - techfreakworm/wan2.2-t2v-a14b
-# Preload trimmed to the single most-used model (~58 GB) + LoRA mirror
-# (~5 GB) to stay under ZeroGPU's 150 GB ephemeral storage cap. Other
-# checkpoints (Wan 2.1 T2V, Wan 2.x I2V variants) download on first
-# generate of that mode. HF Volume mounts truncate small JSON files
-# (transformer/config.json comes back as 290B instead of 495B), so we
-# bypass mounts in pipelines/handle.py and load via cached repo IDs.
+# preload_from_hub disabled — caches to /home/user/.cache/ which isn't
+# writable by the runtime user, causing xet_get permission-denied. We
+# instead run an explicit snapshot_download at app.py startup pointed at
+# /tmp/hf_cache (via HF_HUB_CACHE env var set on the Space) so logs are
+# visible and the cache lands somewhere writable. HF Volume mounts also
+# truncate small JSON files (transformer/config.json comes back as 290B
+# instead of 495B), so we bypass mounts in pipelines/handle.py.
 # ZeroGPU hardware is set programmatically by scripts/create_space.py
 # (SpaceHardware.ZERO_A10G — empirically the live Blackwell ZeroGPU V2
 # pool as of May 2026).
