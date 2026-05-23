@@ -251,7 +251,7 @@ def _build_t2v_handler():
         steps_override: int,
         cfg_override: float,
         cfg_2_override: float,
-        progress=gr.Progress(track_tqdm=True),
+        progress=gr.Progress(track_tqdm=False),
     ):
         import random
         import tempfile
@@ -352,7 +352,7 @@ def _build_i2v_handler():
         steps_override: int,
         cfg_override: float,
         cfg_2_override: float,
-        progress=gr.Progress(track_tqdm=True),
+        progress=gr.Progress(track_tqdm=False),
     ):
         import random
         import tempfile
