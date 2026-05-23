@@ -13,17 +13,15 @@ startup_duration_timeout: "30m"
 preload_from_hub:
   - techfreakworm/wan-lightning-loras
   - techfreakworm/wan2.2-t2v-a14b
-  - techfreakworm/wan2.1-t2v-14b
-  - techfreakworm/wan2.2-i2v-a14b
-  - techfreakworm/wan2.1-i2v-14b-480p
-  - techfreakworm/wan2.1-i2v-14b-720p
-# HF Volume mounts truncate small JSON files (transformer/config.json comes
-# back as 290B instead of 495B), so we bypass them in pipelines/handle.py
-# and load via cached repo IDs above. Mounts are still created by
-# scripts/create_space.py for the LoRA mirror (works correctly there).
+# Preload trimmed to the single most-used model (~58 GB) + LoRA mirror
+# (~5 GB) to stay under ZeroGPU's 150 GB ephemeral storage cap. Other
+# checkpoints (Wan 2.1 T2V, Wan 2.x I2V variants) download on first
+# generate of that mode. HF Volume mounts truncate small JSON files
+# (transformer/config.json comes back as 290B instead of 495B), so we
+# bypass mounts in pipelines/handle.py and load via cached repo IDs.
 # ZeroGPU hardware is set programmatically by scripts/create_space.py
-# (SpaceHardware.ZERO_A10G — empirically the live Blackwell ZeroGPU V2 pool
-# as of May 2026).
+# (SpaceHardware.ZERO_A10G — empirically the live Blackwell ZeroGPU V2
+# pool as of May 2026).
 ---
 
 # Wan Studio
