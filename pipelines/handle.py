@@ -38,15 +38,32 @@ def _slug_for(card: ModelCard) -> str:
     return card.key.replace("_", "-")
 
 
+_LOCAL_PATH_ENV: dict[str, str] = {
+    "wan2.2_t2v_a14b": "WAN_STUDIO_WAN22_T2V_LOCAL_PATH",
+    "wan2.1_t2v_14b": "WAN_STUDIO_WAN21_T2V_LOCAL_PATH",
+    "wan2.2_i2v_a14b": "WAN_STUDIO_WAN22_I2V_LOCAL_PATH",
+    "wan2.1_i2v_14b_480p": "WAN_STUDIO_WAN21_I2V_480_LOCAL_PATH",
+    "wan2.1_i2v_14b_720p": "WAN_STUDIO_WAN21_I2V_720_LOCAL_PATH",
+}
+
+
 def _mount_path(card: ModelCard) -> str:
     """Resolve where the checkpoint lives for from_pretrained().
 
-    HF Volume mounts serve truncated copies of small JSON files (e.g.
-    transformer/config.json is 290B mounted vs 495B on the mirror), so we
-    bypass the mount for base models and always load via the mirror repo ID.
-    `preload_from_hub` in README YAML caches the heavy safetensors into the
-    container image at build time, so the first generate isn't a cold pull.
+    1. If app.py has stashed a LOCAL_PATH env var (via predownload), use that
+       directly. Passing a local path to from_pretrained sidesteps diffusers'
+       snapshot_download cache-revalidation, which has been re-fetching shards
+       inside the ZeroGPU worker fork even though the parent process cached
+       them. Critical fix.
+    2. Otherwise return the mirror repo ID. HF Volume mounts truncate small
+       JSON files (transformer/config.json comes back 290B vs 495B on the
+       real repo), so we bypass mounts entirely for base models.
     """
+    env_var = _LOCAL_PATH_ENV.get(card.key)
+    if env_var:
+        local = os.getenv(env_var)
+        if local and Path(local).is_dir():
+            return local
     return card.repo
 
 

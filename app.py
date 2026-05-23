@@ -71,7 +71,10 @@ def _probe_filesystem() -> None:
     print("=== END FS PROBE ===", flush=True)
 
 
-# ── Explicit pre-download: foreground, controllable, visible logs ───────
+# ── Explicit pre-download + local-path stash ───────────────────────────
+# Returns the snapshot dir so we can pass it directly to from_pretrained
+# (bypassing diffusers' snapshot_download cache-revalidation path inside
+# the forked ZeroGPU worker).
 def _predownload_wan22_t2v() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
@@ -83,6 +86,12 @@ def _predownload_wan22_t2v() -> None:
         t0 = _t.time()
         path = snapshot_download(repo_id=repo, repo_type="model")
         print(f"=== PREDOWNLOAD done in {int(_t.time()-t0)}s → {path} ===", flush=True)
+        # Stash the local snapshot path in env for handle.py to consume.
+        # Passing a local path to from_pretrained skips the snapshot_download
+        # cache-validation path that's been triggering re-downloads inside
+        # the ZeroGPU worker fork.
+        os.environ["WAN_STUDIO_WAN22_T2V_LOCAL_PATH"] = path
+        print(f"=== WAN_STUDIO_WAN22_T2V_LOCAL_PATH set ===", flush=True)
     except Exception as e:
         import traceback
         print(f"=== PREDOWNLOAD FAILED: {type(e).__name__}: {e} ===", flush=True)
@@ -206,7 +215,7 @@ def _build_t2v_handler():
     from utils.backend import spaces_gpu_or_noop
 
     @spaces_gpu_or_noop()(duration=_get_t2v_duration, size="large")
-    def generate_t2v(
+    def generate_t2v(  # noqa: PLR0913 (signature dictated by gradio inputs)
         prompt: str,
         generation: str,
         preset_label: str,
@@ -223,6 +232,23 @@ def _build_t2v_handler():
         import random
         import tempfile
         from diffusers.utils import export_to_video
+
+        # Worker-side filesystem + env diagnostics. Logs once per worker
+        # fork so we can confirm /tmp/hf_cache is visible from inside the
+        # ZeroGPU sandbox.
+        print(
+            f"=== WORKER PROBE: uid={os.getuid()} "
+            f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')} "
+            f"WAN_STUDIO_WAN22_T2V_LOCAL_PATH={os.environ.get('WAN_STUDIO_WAN22_T2V_LOCAL_PATH')} "
+            f"tmp_hf_cache_exists={os.path.exists('/tmp/hf_cache')} ===",
+            flush=True,
+        )
+        if os.path.exists("/tmp/hf_cache"):
+            try:
+                listing = os.listdir("/tmp/hf_cache")
+                print(f"=== WORKER PROBE /tmp/hf_cache listing: {listing} ===", flush=True)
+            except Exception as e:
+                print(f"=== WORKER PROBE /tmp/hf_cache listdir error: {e} ===", flush=True)
 
         if not prompt or not str(prompt).strip():
             raise gr.Error("Prompt is required.")
