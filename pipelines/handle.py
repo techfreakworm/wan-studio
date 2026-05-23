@@ -41,15 +41,12 @@ def _slug_for(card: ModelCard) -> str:
 def _mount_path(card: ModelCard) -> str:
     """Resolve where the checkpoint lives for from_pretrained().
 
-    On ZeroGPU: the duplicated mirror is mounted under /models/<slug>.
-    Locally: fall back to the upstream HF repo (downloads on demand to hub cache).
+    HF Volume mounts serve truncated copies of small JSON files (e.g.
+    transformer/config.json is 290B mounted vs 495B on the mirror), so we
+    bypass the mount for base models and always load via the mirror repo ID.
+    `preload_from_hub` in README YAML caches the heavy safetensors into the
+    container image at build time, so the first generate isn't a cold pull.
     """
-    backend = detect()
-    if backend.is_zerogpu:
-        candidate = SPACE_MOUNT_ROOT / _slug_for(card)
-        if candidate.exists():
-            return str(candidate)
-    # Locally: upstream repo path triggers cached download via huggingface_hub
     return card.repo
 
 

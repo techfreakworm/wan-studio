@@ -29,6 +29,8 @@ from ui import build_all_tabs, build_header, build_sidebar, MODE_PILLS
 from utils import detect
 
 
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Generate-handler helpers — kept at module scope so the `@spaces.GPU(...)`
 # decorator can reference `duration=`/`size=` callables that match the wrapped
