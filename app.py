@@ -35,8 +35,25 @@ except ImportError:
     pass
 
 import os
+from pathlib import Path as _Path
 
 import gradio as gr
+
+# ── Boot probe: assert every expected /models/<slug> mount is present ────
+# create_space.py provisions the mount set from provisioning.manifest; if the
+# Space's actual volumes drift from that manifest we want to fail loud at boot
+# rather than 404 mid-generation. MOUNT_ROOT is "/" in production and is
+# monkeypatched to a tmp dir in tests.
+MOUNT_ROOT = _Path("/")
+
+
+def assert_expected_mounts() -> None:
+    """Fail loud at boot if any expected /models/<slug> mount is missing."""
+    from provisioning.manifest import expected_mount_paths
+    missing = [p for p in expected_mount_paths()
+               if not (MOUNT_ROOT / p.lstrip("/")).exists()]
+    if missing:
+        raise RuntimeError(f"missing mount(s): {missing} — check create_space.py manifest")
 
 from pipelines import modes_in
 from pipelines.handlers import HANDLER_REGISTRY
@@ -92,6 +109,8 @@ def _probe_filesystem() -> None:
         except FileNotFoundError:
             print(f"  {p:<45} NOT-FOUND", flush=True)
     print("=== END FS PROBE ===", flush=True)
+    # FS logging is done — now fail loud if any expected mount is absent.
+    assert_expected_mounts()
 
 
 # ── Stitch the Wan 2.2 T2V dir at startup ──────────────────────────────
