@@ -39,8 +39,33 @@ import os
 import gradio as gr
 
 from pipelines import modes_in
+from pipelines.handlers import HANDLER_REGISTRY
+from pipelines.handle import ModelRegistry
+from pipelines.registry import BY_KEY
 from ui import build_all_tabs, build_header, build_sidebar, MODE_PILLS
 from utils import detect
+
+
+# ── Single warm-handle LRU registry (replaces the per-mode handle dicts) ──
+# `_build_handle(key)` resolves the right HandlerSpec for a registry key and
+# returns a fresh handle via its `handle_cls.for_key(key)`. `ModelRegistry`
+# keeps at-most-one warmed handle and evicts the prior one on a key switch.
+def _build_handle(key: str):
+    """Map a registry key → a fresh handle via the owning HandlerSpec.
+
+    A key belongs to the spec whose `key_for(generation, ...)` produces it for
+    some UI input. We match on the card's generation + the spec's mode prefix
+    (e.g. `wan2.1_i2v_14b_480p` belongs to the `i2v` spec). Falls back to a
+    direct mode-name scan if the prefix heuristic misses.
+    """
+    card = BY_KEY[key]
+    for spec in HANDLER_REGISTRY.values():
+        if spec.mode == card.mode:
+            return spec.handle_cls.for_key(key)
+    raise KeyError(f"No HandlerSpec registered for key {key!r} (mode {card.mode!r})")
+
+
+REGISTRY = ModelRegistry(factory=_build_handle)
 
 
 # ── Startup probe: log filesystem permissions for cache paths ───────────
@@ -106,14 +131,13 @@ def _preload_default_t2v_handle() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
     try:
-        from pipelines.t2v import T2VHandle
         import time as _t
         key = "wan2.2_t2v_a14b"
         print(f"=== PRELOAD T2V handle to CPU: {key} ===", flush=True)
         t0 = _t.time()
-        handle = T2VHandle.for_key(key)
-        handle.ensure_loaded()  # disk → CPU RAM only (no CUDA touch)
-        T2V_HANDLES[key] = handle
+        # acquire() builds via _build_handle + ensure_loaded (disk → CPU RAM
+        # only; no CUDA touch) and warms it in the single ModelRegistry LRU.
+        REGISTRY.acquire(key)
         print(f"=== PRELOAD done in {int(_t.time()-t0)}s — handle cached ===", flush=True)
     except Exception as e:
         import traceback
@@ -136,51 +160,20 @@ _preload_default_t2v_handle()
 # import time, so `from app import build; build()` is cheap.
 # ────────────────────────────────────────────────────────────────────────────
 
-# Per-key handle caches.  Populated on first Generate click for that key.
-T2V_HANDLES: dict = {}
-I2V_HANDLES: dict = {}
+def _key_for(mode: str, generation: str, resolution_label: str = "") -> str:
+    """Resolve the registry key for a (mode, generation, resolution) via the
+    owning HandlerSpec, then apply the local-dev override if present.
 
-
-def _t2v_key_for(generation: str) -> str:
-    """Map generation selector → registry key for T2V."""
-    key = "wan2.2_t2v_a14b" if generation == "wan2.2" else "wan2.1_t2v_14b"
-    # Local-dev override: allow forcing 1.3B for faster MPS smoke
-    local_override = os.getenv("WAN_STUDIO_T2V_LOCAL_KEY")
+    The per-mode `key_for` lives on the HandlerSpec (pipelines/t2v.py,
+    pipelines/i2v.py), so this single helper drives both tiers.
+    """
+    spec = HANDLER_REGISTRY[mode]
+    key = spec.key_for(generation, resolution_label=resolution_label)
+    # Local-dev override: allow forcing a smaller checkpoint for faster MPS smoke.
+    local_override = os.getenv(f"WAN_STUDIO_{mode.upper()}_LOCAL_KEY")
     if local_override and os.getenv("SPACES_ZERO_GPU") is None:
         key = local_override
     return key
-
-
-def _i2v_key_for(generation: str, resolution_label: str) -> str:
-    """Map (generation, resolution) → registry key for I2V."""
-    if generation == "wan2.2":
-        key = "wan2.2_i2v_a14b"
-    elif "720" in (resolution_label or ""):
-        key = "wan2.1_i2v_14b_720p"
-    else:
-        key = "wan2.1_i2v_14b_480p"
-    local_override = os.getenv("WAN_STUDIO_I2V_LOCAL_KEY")
-    if local_override and os.getenv("SPACES_ZERO_GPU") is None:
-        key = local_override
-    return key
-
-
-def _get_t2v_handle(generation: str):
-    """Lazy-load + cache a T2VHandle keyed by registry key."""
-    from pipelines.t2v import T2VHandle
-    key = _t2v_key_for(generation)
-    if key not in T2V_HANDLES:
-        T2V_HANDLES[key] = T2VHandle.for_key(key)
-    return T2V_HANDLES[key]
-
-
-def _get_i2v_handle(generation: str, resolution_label: str):
-    """Lazy-load + cache an I2VHandle keyed by registry key."""
-    from pipelines.i2v import I2VHandle
-    key = _i2v_key_for(generation, resolution_label)
-    if key not in I2V_HANDLES:
-        I2V_HANDLES[key] = I2VHandle.for_key(key)
-    return I2V_HANDLES[key]
 
 
 def _parse_resolution(label: str) -> tuple[int, int]:
@@ -199,14 +192,18 @@ def _parse_resolution(label: str) -> tuple[int, int]:
 # rejects with 422. Both T2V + I2V modes are bounded to 'large' on PRO tier
 # (utils.budget.MODE_BUDGET) so we hard-code 'large' on the decorator below.
 
-def _get_t2v_duration(prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
-    from utils.budget import duration_for
-    return duration_for(_t2v_key_for(generation), duration_s=float(duration_s or 3.0))
+def _get_duration(mode, *ui_args, **kwargs):
+    """ZeroGPU `duration=` callable for both tier entrypoints.
 
-
-def _get_i2v_duration(image, prompt, generation, preset_label, resolution_label, duration_s, *args, **kwargs):
+    Receives the same `(mode, *ui_args)` the entrypoint is called with. The
+    per-mode UI layout differs (I2V leads with an image), so we resolve the
+    registry key from the slots that carry (generation, resolution, duration_s)
+    by mode before scaling.
+    """
     from utils.budget import duration_for
-    return duration_for(_i2v_key_for(generation, resolution_label), duration_s=float(duration_s or 3.0))
+    generation, resolution_label, duration_s = _ui_dispatch(mode, ui_args)
+    key = _key_for(mode, generation, resolution_label)
+    return duration_for(key, duration_s=float(duration_s or 3.0))
 
 
 def _coerce_preset(preset_label: str) -> str:
@@ -231,201 +228,208 @@ def _raise_user_error(e: BaseException) -> None:
     raise gr.Error(f"Generation failed: {type(e).__name__}: {e}") from e
 
 
-def _build_t2v_handler():
-    """Build the decorated T2V Generate handler.  The `@spaces.GPU(...)`
-    decorator is fetched at call time so `import spaces` only runs when we're
-    actually on ZeroGPU (locally `spaces_gpu_or_noop` is a no-op factory).
-    """
-    from utils.backend import spaces_gpu_or_noop
+# ── UI-arg layout per mode ────────────────────────────────────────────────
+# The Generate wiring in build() binds a per-mode `inputs=[...]` list. Both
+# wired modes share the same trailing Advanced block (negative_prompt, seed,
+# randomize, steps, cfg, cfg_2); they differ only in the leading slots:
+#   t2v: (prompt, generation, preset, resolution, duration, *advanced)
+#   i2v: (image, prompt, generation, preset, resolution, duration, *advanced)
+# `_inputs_for` (in build) builds these lists; `_ui_dispatch` reads back the
+# (generation, resolution, duration_s) needed for key + duration resolution.
+def _ui_dispatch(mode: str, ui_args: tuple) -> tuple[str, str, float]:
+    """Extract (generation, resolution_label, duration_s) from a mode's raw
+    UI arg tuple. Lets the shared duration callable + key resolver work for
+    both the image-led (i2v) and prompt-led (t2v) layouts."""
+    if mode == "i2v":
+        # (image, prompt, generation, preset, resolution, duration, ...)
+        return ui_args[2], ui_args[4], ui_args[5]
+    # t2v: (prompt, generation, preset, resolution, duration, ...)
+    return ui_args[1], ui_args[3], ui_args[4]
 
-    @spaces_gpu_or_noop()(duration=_get_t2v_duration, size="large")
-    def generate_t2v(  # noqa: PLR0913 (signature dictated by gradio inputs)
-        prompt: str,
-        generation: str,
-        preset_label: str,
-        resolution_label: str,
-        duration_s: float,
-        negative_prompt: str,
-        seed: int,
-        randomize: bool,
-        steps_override: int,
-        cfg_override: float,
-        cfg_2_override: float,
-        progress=gr.Progress(track_tqdm=False),
-    ):
-        import random
-        import tempfile
-        from diffusers.utils import export_to_video
 
-        # Worker-side filesystem + env diagnostics. Logs once per worker
-        # fork so we can confirm /tmp/hf_cache is visible from inside the
-        # ZeroGPU sandbox.
-        print(
-            f"=== WORKER PROBE: uid={os.getuid()} "
-            f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')} "
-            f"WAN_STUDIO_WAN22_T2V_LOCAL_PATH={os.environ.get('WAN_STUDIO_WAN22_T2V_LOCAL_PATH')} "
-            f"tmp_hf_cache_exists={os.path.exists('/tmp/hf_cache')} ===",
-            flush=True,
+def _build_inference_kwargs(preset_kwargs, steps_override, cfg_override, cfg_2_override):
+    """Common Fast/Quality → pipeline-kwargs merge shared by both modes."""
+    inference_kwargs = {
+        "num_inference_steps": (
+            int(steps_override) if steps_override and int(steps_override) > 0
+            else preset_kwargs.num_inference_steps
+        ),
+        "guidance_scale": (
+            float(cfg_override) if cfg_override and float(cfg_override) > 0
+            else preset_kwargs.guidance_scale
+        ),
+    }
+    if preset_kwargs.guidance_scale_2 is not None:
+        inference_kwargs["guidance_scale_2"] = (
+            float(cfg_2_override) if cfg_2_override and float(cfg_2_override) > 0
+            else preset_kwargs.guidance_scale_2
         )
-        if os.path.exists("/tmp/hf_cache"):
-            try:
-                listing = os.listdir("/tmp/hf_cache")
-                print(f"=== WORKER PROBE /tmp/hf_cache listing: {listing} ===", flush=True)
-            except Exception as e:
-                print(f"=== WORKER PROBE /tmp/hf_cache listdir error: {e} ===", flush=True)
+    return inference_kwargs
 
-        if not prompt or not str(prompt).strip():
-            raise gr.Error("Prompt is required.")
 
+def _run_t2v(spec, ui_args, progress):
+    """T2V body: resolve key → acquire (LRU) → configure preset → generate →
+    export. Behaviour-identical to the prior `generate_t2v` closure."""
+    import random
+    import tempfile
+    from diffusers.utils import export_to_video
+
+    (prompt, generation, preset_label, resolution_label, duration_s,
+     negative_prompt, seed, randomize, steps_override, cfg_override,
+     cfg_2_override) = ui_args
+
+    # Worker-side filesystem + env diagnostics. Logs once per worker fork so we
+    # can confirm /tmp/hf_cache is visible from inside the ZeroGPU sandbox.
+    print(
+        f"=== WORKER PROBE: uid={os.getuid()} "
+        f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')} "
+        f"WAN_STUDIO_WAN22_T2V_LOCAL_PATH={os.environ.get('WAN_STUDIO_WAN22_T2V_LOCAL_PATH')} "
+        f"tmp_hf_cache_exists={os.path.exists('/tmp/hf_cache')} ===",
+        flush=True,
+    )
+    if os.path.exists("/tmp/hf_cache"):
         try:
-            if randomize:
-                seed = random.randint(0, 2**31 - 1)
-
-            preset = _coerce_preset(preset_label)
-            handle = _get_t2v_handle(generation)
-            progress(0.05, desc="Configuring preset…")
-            preset_kwargs = handle.configure_preset(preset)
-
-            inference_kwargs = {
-                "num_inference_steps": (
-                    int(steps_override) if steps_override and int(steps_override) > 0
-                    else preset_kwargs.num_inference_steps
-                ),
-                "guidance_scale": (
-                    float(cfg_override) if cfg_override and float(cfg_override) > 0
-                    else preset_kwargs.guidance_scale
-                ),
-            }
-            if preset_kwargs.guidance_scale_2 is not None:
-                inference_kwargs["guidance_scale_2"] = (
-                    float(cfg_2_override) if cfg_2_override and float(cfg_2_override) > 0
-                    else preset_kwargs.guidance_scale_2
-                )
-
-            height, width = _parse_resolution(resolution_label)
-            # Wan VAE temporal patching: num_frames must be 4k+1.
-            num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
-
-            progress(0.2, desc="Generating frames…")
-            frames = handle.generate(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                seed=int(seed),
-                preset_kwargs=inference_kwargs,
-            )
-
-            progress(0.9, desc="Encoding MP4…")
-            fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_t2v_")
-            os.close(fd)
-            export_to_video(frames, out_path, fps=16)
-
-            if preset_kwargs.fallback_message:
-                gr.Info(preset_kwargs.fallback_message, duration=8)
-            return out_path
-        except gr.Error:
-            raise
+            listing = os.listdir("/tmp/hf_cache")
+            print(f"=== WORKER PROBE /tmp/hf_cache listing: {listing} ===", flush=True)
         except Exception as e:
-            _raise_user_error(e)
+            print(f"=== WORKER PROBE /tmp/hf_cache listdir error: {e} ===", flush=True)
 
-    return generate_t2v
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("Prompt is required.")
+
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    preset = _coerce_preset(preset_label)
+    handle = REGISTRY.acquire(_key_for(spec.mode, generation, resolution_label))
+    progress(0.05, desc="Configuring preset…")
+    preset_kwargs = handle.configure_preset(preset)
+    inference_kwargs = _build_inference_kwargs(
+        preset_kwargs, steps_override, cfg_override, cfg_2_override
+    )
+
+    height, width = _parse_resolution(resolution_label)
+    # Wan VAE temporal patching: num_frames must be 4k+1.
+    num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+
+    progress(0.2, desc="Generating frames…")
+    frames = handle.generate(
+        prompt=prompt,
+        negative_prompt=negative_prompt or "",
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        seed=int(seed),
+        preset_kwargs=inference_kwargs,
+    )
+
+    progress(0.9, desc="Encoding MP4…")
+    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_t2v_")
+    os.close(fd)
+    export_to_video(frames, out_path, fps=16)
+
+    if preset_kwargs.fallback_message:
+        gr.Info(preset_kwargs.fallback_message, duration=8)
+    return out_path
 
 
-def _build_i2v_handler():
-    """Mirror of `_build_t2v_handler` for image-to-video.  Auto-picks the
-    checkpoint by (generation × resolution) and coerces filepath → PIL.Image."""
-    from utils.backend import spaces_gpu_or_noop
+def _run_i2v(spec, ui_args, progress):
+    """I2V body: auto-picks the checkpoint by (generation × resolution) and
+    coerces filepath → PIL.Image. Behaviour-identical to `generate_i2v`."""
+    import random
+    import tempfile
+    from diffusers.utils import export_to_video
+    from PIL import Image
 
-    @spaces_gpu_or_noop()(duration=_get_i2v_duration, size="large")
-    def generate_i2v(
-        image,
-        prompt: str,
-        generation: str,
-        preset_label: str,
-        resolution_label: str,
-        duration_s: float,
-        negative_prompt: str,
-        seed: int,
-        randomize: bool,
-        steps_override: int,
-        cfg_override: float,
-        cfg_2_override: float,
-        progress=gr.Progress(track_tqdm=False),
-    ):
-        import random
-        import tempfile
-        from diffusers.utils import export_to_video
-        from PIL import Image
+    (image, prompt, generation, preset_label, resolution_label, duration_s,
+     negative_prompt, seed, randomize, steps_override, cfg_override,
+     cfg_2_override) = ui_args
 
-        if image is None:
-            raise gr.Error("Please upload an image.")
-        if not prompt or not str(prompt).strip():
-            raise gr.Error("Motion prompt is required.")
+    if image is None:
+        raise gr.Error("Please upload an image.")
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("Motion prompt is required.")
 
-        try:
-            # Coerce filepath → PIL.Image (gr.Image type="pil" already yields a
-            # PIL.Image, but tolerate strings for callers that bind type="filepath").
-            if isinstance(image, str):
-                image = Image.open(image).convert("RGB")
-            elif hasattr(image, "convert"):
-                image = image.convert("RGB")
+    # Coerce filepath → PIL.Image (gr.Image type="pil" already yields a
+    # PIL.Image, but tolerate strings for callers that bind type="filepath").
+    if isinstance(image, str):
+        image = Image.open(image).convert("RGB")
+    elif hasattr(image, "convert"):
+        image = image.convert("RGB")
 
-            if randomize:
-                seed = random.randint(0, 2**31 - 1)
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
 
-            preset = _coerce_preset(preset_label)
-            handle = _get_i2v_handle(generation, resolution_label)
-            progress(0.05, desc="Configuring preset…")
-            preset_kwargs = handle.configure_preset(preset)
+    preset = _coerce_preset(preset_label)
+    handle = REGISTRY.acquire(_key_for(spec.mode, generation, resolution_label))
+    progress(0.05, desc="Configuring preset…")
+    preset_kwargs = handle.configure_preset(preset)
+    inference_kwargs = _build_inference_kwargs(
+        preset_kwargs, steps_override, cfg_override, cfg_2_override
+    )
 
-            inference_kwargs = {
-                "num_inference_steps": (
-                    int(steps_override) if steps_override and int(steps_override) > 0
-                    else preset_kwargs.num_inference_steps
-                ),
-                "guidance_scale": (
-                    float(cfg_override) if cfg_override and float(cfg_override) > 0
-                    else preset_kwargs.guidance_scale
-                ),
-            }
-            if preset_kwargs.guidance_scale_2 is not None:
-                inference_kwargs["guidance_scale_2"] = (
-                    float(cfg_2_override) if cfg_2_override and float(cfg_2_override) > 0
-                    else preset_kwargs.guidance_scale_2
-                )
+    # max_area drives `aspect_ratio_resize` — clamp to the picked res.
+    h_label, w_label = _parse_resolution(resolution_label)
+    max_area = h_label * w_label
+    num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
 
-            # max_area drives `aspect_ratio_resize` — clamp to the picked res.
-            h_label, w_label = _parse_resolution(resolution_label)
-            max_area = h_label * w_label
-            num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+    progress(0.2, desc="Generating frames…")
+    frames = handle.generate(
+        image=image,
+        prompt=prompt,
+        negative_prompt=negative_prompt or "",
+        max_area=max_area,
+        num_frames=num_frames,
+        seed=int(seed),
+        preset_kwargs=inference_kwargs,
+    )
 
-            progress(0.2, desc="Generating frames…")
-            frames = handle.generate(
-                image=image,
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                max_area=max_area,
-                num_frames=num_frames,
-                seed=int(seed),
-                preset_kwargs=inference_kwargs,
-            )
+    progress(0.9, desc="Encoding MP4…")
+    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_i2v_")
+    os.close(fd)
+    export_to_video(frames, out_path, fps=16)
 
-            progress(0.9, desc="Encoding MP4…")
-            fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_i2v_")
-            os.close(fd)
-            export_to_video(frames, out_path, fps=16)
+    if preset_kwargs.fallback_message:
+        gr.Info(preset_kwargs.fallback_message, duration=8)
+    return out_path
 
-            if preset_kwargs.fallback_message:
-                gr.Info(preset_kwargs.fallback_message, duration=8)
-            return out_path
-        except gr.Error:
-            raise
-        except Exception as e:
-            _raise_user_error(e)
 
-    return generate_i2v
+# Per-mode body dispatch. Append-only: a new wired mode adds its `_run_*` here.
+_MODE_RUNNERS = {"t2v": _run_t2v, "i2v": _run_i2v}
+
+
+def _run(spec, *ui_args, progress=None):
+    """Generic Generate body — resolve key, acquire (LRU), configure preset,
+    generate, export. Dispatches to the mode-specific runner so T2V/I2V keep
+    their distinct input layouts while sharing the registry + LRU plumbing."""
+    if progress is None:
+        progress = gr.Progress(track_tqdm=False)
+    runner = _MODE_RUNNERS[spec.mode]
+    try:
+        return runner(spec, ui_args, progress)
+    except gr.Error:
+        raise
+    except Exception as e:
+        _raise_user_error(e)
+
+
+# ── Per-tier @spaces.GPU entrypoints — size MUST be a static literal ───────
+# `@spaces.GPU(duration=callable)` accepts a dynamic per-args duration, but
+# `size=` must be a literal ('large' | 'xlarge'); passing a callable serializes
+# the function into the /schedule POST body and HF rejects it (422). The two
+# wired modes (T2V/I2V) are both tier `large`; the `xlarge` entrypoint exists
+# for later modes (Animate) that the HANDLER_REGISTRY routes there.
+from utils.backend import spaces_gpu_or_noop  # noqa: E402
+
+
+@spaces_gpu_or_noop()(duration=_get_duration, size="large")
+def generate_large(mode, *args, progress=gr.Progress(track_tqdm=False)):
+    return _run(HANDLER_REGISTRY[mode], *args, progress=progress)
+
+
+@spaces_gpu_or_noop()(duration=_get_duration, size="xlarge")
+def generate_xlarge(mode, *args, progress=gr.Progress(track_tqdm=False)):
+    return _run(HANDLER_REGISTRY[mode], *args, progress=progress)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1766,62 +1770,57 @@ def build() -> gr.Blocks:
         )
 
         # ── Generate handlers ────────────────────────────────────────────
-        # T2V + I2V → real handles (Wave F+G). Other tabs keep the no-op
-        # toast until their pipelines land in later waves.
+        # Drive the Generate wiring from HANDLER_REGISTRY: every registered
+        # mode wires its Generate button to the per-tier @spaces.GPU entrypoint
+        # (large/xlarge by spec.tier); unregistered modes keep the no-op toast
+        # until their pipelines land in later waves.
         def _generate_toast():
             gr.Info("Demo mode — Generate disabled while design direction is being chosen.")
 
-        # --- T2V: wire to the real handle ---
-        t2v_in = tabs["t2v"]["inputs"]
-        t2v_out = tabs["t2v"]["outputs"]
-        t2v_in["generate"].click(
-            fn=_build_t2v_handler(),
-            inputs=[
-                t2v_in["prompt"],
-                header["generation"],
-                header["preset_state"],
-                t2v_in["resolution"],
-                t2v_in["duration"],
-                t2v_in["negative_prompt"],
-                t2v_in["seed"],
-                t2v_in["randomize"],
-                t2v_in["steps"],
-                t2v_in["cfg"],
-                t2v_in["cfg_2"],
-            ],
-            outputs=t2v_out["video"],
-        )
+        # Common trailing Advanced inputs, shared by every wired mode.
+        def _advanced_inputs(tab_in: dict) -> list:
+            return [
+                tab_in["negative_prompt"],
+                tab_in["seed"],
+                tab_in["randomize"],
+                tab_in["steps"],
+                tab_in["cfg"],
+                tab_in["cfg_2"],
+            ]
 
-        # --- I2V: wire to the real handle ---
-        i2v_in = tabs["i2v"]["inputs"]
-        i2v_out = tabs["i2v"]["outputs"]
-        i2v_in["generate"].click(
-            fn=_build_i2v_handler(),
-            inputs=[
-                i2v_in["image"],
-                i2v_in["prompt"],
-                header["generation"],
-                header["preset_state"],
-                i2v_in["resolution"],
-                i2v_in["duration"],
-                i2v_in["negative_prompt"],
-                i2v_in["seed"],
-                i2v_in["randomize"],
-                i2v_in["steps"],
-                i2v_in["cfg"],
-                i2v_in["cfg_2"],
-            ],
-            outputs=i2v_out["video"],
-        )
+        # Per-mode ordered inputs list — must match the runner's unpacking in
+        # `_run_<mode>` (i2v leads with the image; both share generation/preset
+        # from the header + resolution/duration from the tab, then advanced).
+        def _inputs_for(mode: str, tab: dict, hdr: dict) -> list:
+            tab_in = tab["inputs"]
+            lead = [tab_in["image"], tab_in["prompt"]] if mode == "i2v" else [tab_in["prompt"]]
+            return lead + [
+                hdr["generation"],
+                hdr["preset_state"],
+                tab_in["resolution"],
+                tab_in["duration"],
+            ] + _advanced_inputs(tab_in)
 
-        # --- Other tabs stay on the no-op toast ---
-        for tab_key in ["ti2v", "flf2v", "v2v", "vace", "s2v", "animate"]:
-            gen_btn = tabs[tab_key]["inputs"].get("generate") if "inputs" in tabs[tab_key] else None
-            if gen_btn is not None:
-                gen_btn.click(fn=_generate_toast, inputs=None, outputs=None)
+        WIRED = set(HANDLER_REGISTRY)
+        for mode, tab in tabs.items():
+            tab_in = tab.get("inputs", {})
+            if mode in WIRED and "generate" in tab_in:
+                spec = HANDLER_REGISTRY[mode]
+                entry = generate_xlarge if spec.tier == "xlarge" else generate_large
+                tab_in["generate"].click(
+                    fn=lambda *a, _m=mode: entry(_m, *a),
+                    inputs=_inputs_for(mode, tab, header),
+                    outputs=tab["outputs"]["video"],
+                )
+            elif "generate" in tab_in:
+                tab_in["generate"].click(fn=_generate_toast, inputs=None, outputs=None)
         # FLF2V has a secondary "Generate end frame" button.
         if "inputs" in tabs.get("flf2v", {}) and "generate_end" in tabs["flf2v"]["inputs"]:
             tabs["flf2v"]["inputs"]["generate_end"].click(fn=_generate_toast, inputs=None, outputs=None)
+
+        # Still referenced by the cfg_2 visibility toggle below.
+        t2v_in = tabs["t2v"]["inputs"]
+        i2v_in = tabs["i2v"]["inputs"]
 
         # --- cfg_2 visibility toggle (Wan 2.2 MoE has high/low-noise CFG) ---
         def _toggle_cfg_2(generation: str):
