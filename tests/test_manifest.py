@@ -41,3 +41,29 @@ def test_create_space_uses_full_manifest():
     specs = cs.build_volume_specs()          # returns the manifest VolumeSpecs
     from provisioning.manifest import all_volumes
     assert {v.mount_path for v in specs} == {v.mount_path for v in all_volumes()}
+
+
+def test_every_manifest_source_has_a_creator():
+    """Every mounted source must actually be created by a provisioning script.
+
+    The boot probe hard-fails the Space if a mount source repo doesn't exist, so
+    every `source` in all_volumes() must be in the set of repos the scripts create:
+      (a) the bf16 mirror of every NON-vendored card (created by convert_to_bf16),
+      (b) the shared / preproc / lora mirrors,
+      (c) the VENDORED_DUPLICATES dest ids (created by duplicate_upstream).
+    """
+    from provisioning.bf16_plan import conversion_plan
+    from scripts.duplicate_upstream import VENDORED_DUPLICATES
+
+    creatable: set[str] = set()
+    # (a) convert_to_bf16 creates the mirror for every card with a diffusers plan
+    for m in ALL_MODELS:
+        if conversion_plan(m) is not None:
+            creatable.add(m.mirror_repo)
+    # (b) shared / preproc / lora mirrors
+    creatable |= {manifest.SHARED_MIRROR, manifest.PREPROC_MIRROR, manifest.LORA_MIRROR}
+    # (c) vendored duplicates created by duplicate_upstream
+    creatable |= {dest for _upstream, dest in VENDORED_DUPLICATES}
+
+    for v in manifest.all_volumes():
+        assert v.source in creatable, f"{v.source} mounted but never created"

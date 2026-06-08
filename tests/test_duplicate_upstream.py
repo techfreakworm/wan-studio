@@ -6,10 +6,12 @@ _preproc_dest) that are unit-tested directly. This is what would have caught the
 dest_path-ignored bugs without any network access.
 """
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from provisioning.preproc_manifest import PREPROC_ASSETS, PreprocAsset
 import scripts.duplicate_upstream as du
+from scripts.duplicate_upstream import _recast_safetensors
 
 
 # --------------------------------------------------------------------------- #
@@ -161,6 +163,24 @@ def test_recast_safetensors_recasts_and_copies_verbatim(tmp_path):
     assert nested["b"].dtype == torch.bfloat16
     # non-tensor files copied verbatim, byte-for-byte.
     assert (dst / "config.json").read_text() == '{"hello": "world"}'
+
+
+def test_recast_preserves_metadata(tmp_path):
+    """The safetensors `__metadata__` header (e.g. {'format':'pt'}) must survive recast."""
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    save_file(
+        {"w": torch.ones(4, dtype=torch.float32)},
+        str(src / "model.safetensors"),
+        metadata={"format": "pt", "foo": "bar"},
+    )
+
+    _recast_safetensors(src, dst, torch.bfloat16)
+
+    with safe_open(str(dst / "model.safetensors"), framework="pt") as f:
+        assert f.metadata() == {"format": "pt", "foo": "bar"}
+    assert load_file(str(dst / "model.safetensors"))["w"].dtype == torch.bfloat16
 
 
 # --------------------------------------------------------------------------- #

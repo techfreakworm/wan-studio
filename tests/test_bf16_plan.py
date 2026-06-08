@@ -28,6 +28,14 @@ def test_animate_keeps_image_processor_and_encoder():
     assert {"image_processor", "image_encoder"} <= set(plan.keep_subfolders)
 
 
+def test_i2v_keeps_image_processor_not_encoder():
+    """R9 insurance: image-conditioned mirrors keep image_processor (tiny config)
+    but NOT image_encoder (the large CLIP is injected for I2V/FLF2V)."""
+    plan = conversion_plan(BY_KEY["wan2.1_i2v_14b_480p"])
+    assert "image_processor" in plan.keep_subfolders
+    assert "image_encoder" not in plan.keep_subfolders
+
+
 def test_vendored_cards_have_no_diffusers_plan():
     """S2V / TI2V are vendored (diffusers_class=None) → bf16 conversion deferred to #3."""
     for key in ("wan2.2_s2v_14b", "wan2.2_ti2v_5b"):

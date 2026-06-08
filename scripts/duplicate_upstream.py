@@ -32,11 +32,14 @@ from provisioning.preproc_manifest import (  # noqa: E402
 from provisioning.manifest import SHARED_MIRROR, PREPROC_MIRROR  # noqa: E402
 
 
-# Vendored S2V / TI2V repos — mirrored as-is (no dtype conversion).
+# Vendored S2V / TI2V repos — mirrored AS-IS (fp32, no dtype conversion here).
+# Dest ids MUST match the cards' `mirror_repo` so manifest.all_volumes() mounts
+# exactly what this script creates. They carry the `-bf16` suffix despite being
+# fp32 mirrors: #3 bf16-converts them in place, keeping the dest id stable.
 # (upstream_repo, dest_repo)
 VENDORED_DUPLICATES: list[tuple[str, str]] = [
-    ("Wan-AI/Wan2.2-S2V-14B",  "techfreakworm/wan2.2-s2v-14b"),
-    ("Wan-AI/Wan2.2-TI2V-5B",  "techfreakworm/wan2.2-ti2v-5b"),
+    ("Wan-AI/Wan2.2-S2V-14B",  "techfreakworm/wan2.2-s2v-14b-bf16"),
+    ("Wan-AI/Wan2.2-TI2V-5B",  "techfreakworm/wan2.2-ti2v-5b-bf16"),
 ]
 
 
@@ -161,6 +164,7 @@ def _recast_safetensors(src: Path, dst: Path, dtype) -> None:
     """
     import shutil
 
+    from safetensors import safe_open
     from safetensors.torch import load_file, save_file
 
     dst.mkdir(parents=True, exist_ok=True)
@@ -169,8 +173,12 @@ def _recast_safetensors(src: Path, dst: Path, dtype) -> None:
         if item.is_dir():
             _recast_safetensors(item, out, dtype)
         elif item.suffix == ".safetensors":
+            # Preserve the safetensors header (e.g. {"format":"pt"}); save_file
+            # drops it unless we pass metadata= back through explicitly.
+            with safe_open(str(item), framework="pt") as f:
+                meta = f.metadata()
             tensors = {k: v.to(dtype) for k, v in load_file(str(item)).items()}
-            save_file(tensors, str(out))
+            save_file(tensors, str(out), metadata=meta)
         else:
             shutil.copy2(item, out)
 
