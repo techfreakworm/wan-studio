@@ -112,14 +112,18 @@ def _mount_path(card: ModelCard) -> str:
     """Resolve where the checkpoint lives for from_pretrained().
 
     Priority:
-      1. Stitched local dir (mount + bundled metadata) — zero disk cost
-         on ZeroGPU, big files served via the read-only volume mount.
-      2. Upstream mirror repo ID — local MPS dev or when stitching fails.
+      1. Stitched local dir (mount + bundled metadata) — zero disk on ZeroGPU.
+      2. ZeroGPU + no mount → RAISE (never silently download fp32 into /tmp).
+      3. Local + no mount → the bf16 mirror repo (downloads once to persistent cache).
     """
     stitched = stitch_local_dir(card)
     if stitched:
         return stitched
-    return card.repo
+    if os.getenv("SPACES_ZERO_GPU") is not None:
+        raise RuntimeError(
+            f"mount /models/{_slug_for(card)} missing — check create_space.py manifest"
+        )
+    return card.mirror_repo
 
 
 # Path to the mounted Lightning LoRA bundle on ZeroGPU.
