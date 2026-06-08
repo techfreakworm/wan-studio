@@ -53,10 +53,9 @@ from utils import detect
 def _build_handle(key: str):
     """Map a registry key → a fresh handle via the owning HandlerSpec.
 
-    A key belongs to the spec whose `key_for(generation, ...)` produces it for
-    some UI input. We match on the card's generation + the spec's mode prefix
-    (e.g. `wan2.1_i2v_14b_480p` belongs to the `i2v` spec). Falls back to a
-    direct mode-name scan if the prefix heuristic misses.
+    Look up the card by `key` in `BY_KEY`, then return the handle from the spec
+    whose `mode` equals `card.mode` (e.g. `wan2.1_i2v_14b_480p` resolves to the
+    spec with `mode == "i2v"`). Raises `KeyError` if no spec matches the mode.
     """
     card = BY_KEY[key]
     for spec in HANDLER_REGISTRY.values():
@@ -1808,7 +1807,7 @@ def build() -> gr.Blocks:
                 spec = HANDLER_REGISTRY[mode]
                 entry = generate_xlarge if spec.tier == "xlarge" else generate_large
                 tab_in["generate"].click(
-                    fn=lambda *a, _m=mode: entry(_m, *a),
+                    fn=lambda *a, _m=mode, _entry=entry: _entry(_m, *a),
                     inputs=_inputs_for(mode, tab, header),
                     outputs=tab["outputs"]["video"],
                 )
