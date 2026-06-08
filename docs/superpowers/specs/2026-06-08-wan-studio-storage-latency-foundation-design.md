@@ -226,3 +226,20 @@ No network download at any step (mounts present). Shared encoders never reloaded
 
 ## 13. Out of scope (recap)
 Mode pipeline wiring (#1–#4) · AOTI (#0.5) · vendored-checkpoint bf16 conversion (#3) · Send-to/Gallery/Settings (#4) · FP8/quantization · `/data` persistent storage.
+
+---
+
+## 14. Amendments (2026-06-09, from the program architecture analysis)
+
+The all-12-modes program analysis ([`program-architecture-and-risks`](./2026-06-08-wan-studio-program-architecture-and-risks.md)) surfaced corrections that #0 must implement so later phases aren't built on a wrong foundation. These are now in-scope for #0:
+
+1. **`wan-preproc` mirror must include Animate's preproc** (ViTPose-H + YOLOv10m + SAM2 Hiera Large, ~2 GB) **in addition to** VACE's DWPose/MiDaS/RAFT (~1 GB). Verified: the Diffusers Animate mirror has **no** `process_checkpoint/` (original spec §9.7 was wrong); these weights live only in the non-Diffusers `Wan-AI/Wan2.2-Animate-14B` repo. (S2V's wav2vec2 rides the S2V as-is mount, so it need NOT be duplicated into `wan-preproc`.) [risk R7]
+2. **Do not apply the transformer-only strip to the Animate mirror** — keep `image_processor/`, `scheduler/`, `tokenizer/`, `image_encoder/` (`WanAnimatePipeline.from_pretrained` needs them and `shared.py` doesn't inject `image_processor`). Smoke-test that VACE/V2V/Animate `from_pretrained` tolerate the strip before mass conversion. [risk R9, extends §12]
+3. **Add `shared.image_processor()`** (`CLIPImageProcessor`) to `pipelines/shared.py` (Animate needs it; current shared.py injects vae/text_encoder/image_encoder only).
+4. **Add a `wan2.1_v2v_14b` ModelCard** to `registry.py` (repo = T2V-14B, `diffusers_class="WanVideoToVideoPipeline"`, `requires_image_encoder=False`, `lightning_available=False`, flow_shift 5.0/3.0 by res) + a `MODE_BUDGET` entry, both mapped to the **shared** `/models/wan2.1-t2v-14b` mount (zero extra storage). It is absent today → would KeyError. [risk R15]
+5. **Fold the `HANDLER_REGISTRY` plugin refactor into #0** (or a thin pre-#1 step): a `dict[mode, HandlerSpec]` that per-mode modules register into, so `pipelines/__init__.py` and the `app.py` Generate-wiring loop iterate it instead of hard-coding per-mode blocks. Makes every later phase append-only → enables parallel teams. [risk R3]
+6. **Retrofit the existing `T2V_HANDLES`/`I2V_HANDLES` app.py dicts onto `ModelRegistry.acquire`** so the LRU/evict policy is uniform and all phases inherit it. [§6.2]
+7. **Mount manifest is one atomic source-of-truth list** in `create_space.py` (`set_space_volumes` **replaces** the whole set — never append), plus a boot probe asserting every expected `/models/<slug>` exists. [risk R4]
+8. **Two statically-decorated `@spaces.GPU` entrypoints** (`generate_large`, `generate_xlarge`) since `size` must be a literal; route by mode via `MODE_BUDGET`. [risk R6]
+
+Empirical spikes that gate #0 decisions (run on `wan-studio-staging`): per-Space **mount cap** (governs whether the manifest needs repo-consolidation), and **transformer-only `from_pretrained` tolerance** for the newer pipeline classes (gates mass bf16 conversion). See program doc §6.
