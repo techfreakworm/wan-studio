@@ -4,16 +4,17 @@ CLIP-ViT-H/14 image encoder ONCE at module load. Inject into every pipeline via
 
 Saves ~15 GB of duplicated weights vs loading per-pipeline. See RESEARCH.md §8.1.
 
-On ZeroGPU we read from the stitched Wan 2.2 T2V dir (mounted weights +
-bundled configs) so from_pretrained reads big binaries through the read-only
-volume mount (zero disk cost) and small JSONs from the bundled copy
-(working around the HF Volume small-file truncation bug). The Wan 2.2 T2V
-repo ships with the same UMT5-XXL + AutoencoderKLWan that every Wan pipeline
-shares, so loading them from this single stitched dir is correct.
+On ZeroGPU we read these shared encoders from the wan-shared-encoders mount so
+from_pretrained reads the weights through the read-only volume mount (zero disk
+cost). Locally (no mount) we fall back to the bf16 mirror repo, which downloads
+once into the persistent HF cache. The same UMT5-XXL + AutoencoderKLWan + CLIP
+encoders are shared across every Wan pipeline (2.1 + 2.2).
 """
 from __future__ import annotations
 
 import functools
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from utils.backend import detect
@@ -22,15 +23,24 @@ if TYPE_CHECKING:
     import torch  # noqa: F401
 
 
-def _wan22_t2v_path() -> str:
-    """Stitched Wan 2.2 T2V dir on ZeroGPU; upstream repo as fallback."""
-    from pipelines.handle import stitch_local_dir
-    from pipelines.registry import BY_KEY
+SHARED_MOUNT = Path(os.getenv("WAN_STUDIO_MOUNT_ROOT", "/models")) / "wan-shared-encoders"
+SHARED_MIRROR_REPO = "techfreakworm/wan-shared-encoders"
 
-    stitched = stitch_local_dir(BY_KEY["wan2.2_t2v_a14b"])
-    if stitched:
-        return stitched
-    return "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+
+def _shared_path() -> str:
+    """Resolve the shared-encoders dir.
+
+    ZeroGPU: the wan-shared-encoders mount (fail loud if absent — never silently
+    download ~14 GB into /tmp). Local: the bf16 mirror repo id (downloads once to
+    the persistent HF cache).
+    """
+    if SHARED_MOUNT.exists():
+        return str(SHARED_MOUNT)
+    if os.getenv("SPACES_ZERO_GPU") is not None:
+        raise RuntimeError(
+            f"wan-shared-encoders mount missing at {SHARED_MOUNT} — check create_space.py manifest"
+        )
+    return SHARED_MIRROR_REPO
 
 
 @functools.lru_cache(maxsize=1)
@@ -40,7 +50,7 @@ def text_encoder():
 
     backend = detect()
     return UMT5EncoderModel.from_pretrained(
-        _wan22_t2v_path(),
+        _shared_path(),
         subfolder="text_encoder",
         torch_dtype=backend.dtype,
     )
@@ -57,7 +67,7 @@ def vae():
 
     backend = detect()
     instance = AutoencoderKLWan.from_pretrained(
-        _wan22_t2v_path(),
+        _shared_path(),
         subfolder="vae",
         torch_dtype=backend.vae_dtype,
     )
@@ -69,12 +79,20 @@ def vae():
 
 @functools.lru_cache(maxsize=1)
 def image_encoder():
-    """CLIP-ViT-H/14 — used by I2V, FLF2V, Animate."""
+    """CLIP-ViT-H/14 — used by I2V, FLF2V, Animate, S2V."""
     import torch
     from transformers import CLIPVisionModel
 
     return CLIPVisionModel.from_pretrained(
-        "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+        _shared_path(),
         subfolder="image_encoder",
         torch_dtype=torch.float32,  # must stay fp32 per diffusers docs
     )
+
+
+@functools.lru_cache(maxsize=1)
+def image_processor():
+    """CLIPImageProcessor — required by WanAnimatePipeline (Phase #2)."""
+    from transformers import CLIPImageProcessor
+
+    return CLIPImageProcessor.from_pretrained(_shared_path(), subfolder="image_processor")
