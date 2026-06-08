@@ -126,6 +126,45 @@ def _mount_path(card: ModelCard) -> str:
     return card.mirror_repo
 
 
+# Tier-2 warm cache root. Hot model shards are copied here (real local bytes)
+# once, so repeat reads and forked workers avoid slow HF-mount page-faults.
+TIER2_ROOT = Path("/tmp/wan-hot")
+
+
+def tier2_warm_copy(slug: str, src_dir: str) -> str:
+    """Copy a stitched/mounted checkpoint dir into local /tmp once.
+
+    The first read of a >10 GB model over the HF mount is slow (network
+    page-faults); copying to local disk makes repeat reads (and forked
+    workers) fast. Idempotent via a marker. Caller is responsible for
+    LRU-evicting prior hot copies to stay under the 150 GB disk cap.
+    """
+    src = Path(src_dir)
+    dst = TIER2_ROOT / slug
+    marker = dst / ".wan_hot_done"
+    if marker.exists():
+        return str(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.rglob("*"):
+        if not f.is_file():
+            continue
+        target = dst / f.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copy2(f, target)  # resolves symlinks → real local bytes
+    marker.touch()
+    return str(dst)
+
+
+def tier2_evict(keep_slug: str) -> None:
+    """Remove every hot copy except keep_slug (LRU bound = 1 model)."""
+    if not TIER2_ROOT.exists():
+        return
+    for child in TIER2_ROOT.iterdir():
+        if child.is_dir() and child.name != keep_slug:
+            shutil.rmtree(child, ignore_errors=True)
+
+
 # Path to the mounted Lightning LoRA bundle on ZeroGPU.
 LIGHTNING_MIRROR_MOUNT = SPACE_MOUNT_ROOT / "wan-lightning-loras"
 LIGHTNING_MIRROR_REPO = "techfreakworm/wan-lightning-loras"
