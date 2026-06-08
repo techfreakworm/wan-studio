@@ -34,6 +34,45 @@ def test_build_pipeline_must_be_overridden():
         h._build_pipeline()
 
 
+def test_unload_to_cpu_leaves_shared_encoders():
+    """unload_to_cpu moves only transformer(s) to CPU; shared encoders stay put.
+
+    The VAE / text_encoder / image_encoder are shared across modes and must
+    remain resident (never touched) so switching modes doesn't thrash them.
+    """
+    class _Mod:
+        def __init__(self):
+            self.last_dev = None
+            self.to_calls = 0
+
+        def to(self, dev):
+            self.last_dev = dev
+            self.to_calls += 1
+            return self
+
+    class _FakePipe:
+        def __init__(self):
+            self.transformer = _Mod()
+            self.transformer_2 = _Mod()
+            self.vae = _Mod()
+            self.text_encoder = _Mod()
+            self.image_encoder = _Mod()
+
+    h = WanModelHandle(BY_KEY["wan2.2_t2v_a14b"])
+    pipe = _FakePipe()
+    h.pipe = pipe
+
+    h.unload_to_cpu()
+
+    # Transformers were moved to CPU.
+    assert pipe.transformer.last_dev == "cpu"
+    assert pipe.transformer_2.last_dev == "cpu"
+    # Shared encoders were NOT touched.
+    assert pipe.vae.to_calls == 0
+    assert pipe.text_encoder.to_calls == 0
+    assert pipe.image_encoder.to_calls == 0
+
+
 def test_tier2_warm_copy_symlinks_into_tmp(tmp_path, monkeypatch):
     from pipelines import handle
     src = tmp_path / "stitched"

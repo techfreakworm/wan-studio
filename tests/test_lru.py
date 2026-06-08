@@ -35,3 +35,19 @@ def test_acquire_unknown_raises():
     reg = ModelRegistry(factory=lambda key: _FakeHandle(BY_KEY[key]))
     with pytest.raises(KeyError):
         reg.acquire("nope")
+
+
+def test_acquire_frees_evicted_from_ram():
+    """Evicting the warm transformer must also reclaim CPU RAM.
+
+    After switching keys, the previous handle's pipe must be dropped
+    (pipe = None) AND its entry removed from _handles — otherwise every
+    evicted transformer family stays resident forever, violating the
+    "≤1 warm transformer family resident" invariant (spec §6.2).
+    """
+    reg = ModelRegistry(factory=lambda key: _FakeHandle(BY_KEY[key]))
+    k1, k2 = "wan2.1_t2v_14b", "wan2.1_i2v_14b_480p"
+    h1 = reg.acquire(k1)
+    reg.acquire(k2)
+    assert h1.pipe is None          # CPU RAM reference dropped
+    assert k1 not in reg._handles   # no longer tracked → eligible for GC

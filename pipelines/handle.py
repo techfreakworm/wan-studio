@@ -10,6 +10,7 @@ Only ONE handle's pipeline lives on GPU at a time (managed by app.py orchestrato
 """
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 from pathlib import Path
@@ -336,6 +337,12 @@ class ModelRegistry:
             if prev is not None:
                 prev.unload_to_cpu()
                 tier2_evict(_slug_for(prev.card))
+                # Reclaim CPU RAM: drop the handle entry AND the pipe reference,
+                # then collect. Otherwise every evicted transformer family stays
+                # resident in RAM forever (spec §6.2: ≤1 warm family resident).
+                self._handles.pop(self.warm_key, None)
+                prev.pipe = None
+                gc.collect()
         handle = self._handles.get(key) or self._factory(key)
         handle.ensure_loaded()
         self._handles[key] = handle

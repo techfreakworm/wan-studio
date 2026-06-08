@@ -33,6 +33,7 @@ MODE_BUDGET: dict[str, tuple[Size, int]] = {
     "wan2.1_i2v_14b_480p":     ("large",  90),
     "wan2.1_i2v_14b_720p":     ("large", 120),
     "wan2.1_flf2v_14b_720p":   ("large", 150),
+    "wan2.1_v2v_14b":          ("large",  90),
     "wan2.1_vace_1.3b":        ("large", 150),
     "wan2.1_vace_14b":         ("large", 180),
     # Wan 2.2 — MoE held at `large` for HF PRO compat; needs model CPU offload.

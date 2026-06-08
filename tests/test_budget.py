@@ -53,3 +53,13 @@ def test_small_modes_route_to_large():
     for key in ("wan2.1_t2v_1.3b", "wan2.1_t2v_14b"):
         size, _ = MODE_BUDGET[key]
         assert size == "large"
+
+
+def test_every_registry_key_has_budget():
+    """Every ModelCard in the registry must have a MODE_BUDGET entry.
+
+    A registry key without a budget would raise at @spaces.GPU dispatch time
+    (duration_for / size_for both KeyError). This guards the spec gap.
+    """
+    missing = set(BY_KEY) - set(MODE_BUDGET)
+    assert set(BY_KEY) <= set(MODE_BUDGET), f"registry keys missing budget: {sorted(missing)}"
