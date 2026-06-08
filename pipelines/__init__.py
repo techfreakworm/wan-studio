@@ -19,6 +19,7 @@ from pipelines.preset import Preset, PresetKwargs, resolve
 from pipelines.handle import WanModelHandle
 from pipelines.t2v import T2VHandle
 from pipelines.i2v import I2VHandle, aspect_ratio_resize
+from pipelines.handlers import HANDLER_REGISTRY, HandlerSpec, register  # noqa: F401
 
 __all__ = [
     "ALL_MODELS",
@@ -38,4 +39,7 @@ __all__ = [
     "T2VHandle",
     "I2VHandle",
     "aspect_ratio_resize",
+    "HANDLER_REGISTRY",
+    "HandlerSpec",
+    "register",
 ]

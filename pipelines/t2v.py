@@ -77,3 +77,13 @@ class T2VHandle(WanModelHandle):
             **preset_kwargs,
         )
         return out.frames[0]
+
+
+from pipelines.handlers import HandlerSpec, register  # noqa: E402
+
+
+def _t2v_key_for(generation: str, **_ui) -> str:
+    return "wan2.2_t2v_a14b" if generation == "wan2.2" else "wan2.1_t2v_14b"
+
+
+register(HandlerSpec(mode="t2v", handle_cls=T2VHandle, key_for=_t2v_key_for, tier="large"))

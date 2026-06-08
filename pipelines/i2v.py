@@ -91,3 +91,15 @@ class I2VHandle(WanModelHandle):
             **preset_kwargs,
         )
         return out.frames[0]
+
+
+from pipelines.handlers import HandlerSpec, register  # noqa: E402
+
+
+def _i2v_key_for(generation: str, *, resolution_label: str = "", **_ui) -> str:
+    if generation == "wan2.2":
+        return "wan2.2_i2v_a14b"
+    return "wan2.1_i2v_14b_720p" if "720" in resolution_label else "wan2.1_i2v_14b_480p"
+
+
+register(HandlerSpec(mode="i2v", handle_cls=I2VHandle, key_for=_i2v_key_for, tier="large"))
