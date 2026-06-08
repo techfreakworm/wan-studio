@@ -21,6 +21,19 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from provisioning.preproc_manifest import SHARED_ENCODERS, PREPROC_ASSETS  # noqa: E402
+from provisioning.manifest import SHARED_MIRROR, PREPROC_MIRROR  # noqa: E402
+
+
+# Vendored S2V / TI2V repos — mirrored as-is (no dtype conversion).
+# (upstream_repo, dest_repo)
+VENDORED_DUPLICATES: list[tuple[str, str]] = [
+    ("Wan-AI/Wan2.2-S2V-14B",  "techfreakworm/wan2.2-s2v-14b"),
+    ("Wan-AI/Wan2.2-TI2V-5B",  "techfreakworm/wan2.2-ti2v-5b"),
+]
+
 
 # Base model duplicates — full repo copies.
 PHASE_1_BASE_DUPLICATES: list[tuple[str, str]] = [
@@ -126,19 +139,121 @@ def build_lightning_mirror(api: HfApi, dry_run: bool) -> None:
             print(f"  ✓ uploaded {dst_path}")
 
 
+def duplicate_vendored(api: HfApi, dry_run: bool) -> None:
+    """Mirror the vendored S2V / TI2V repos as-is (no dtype conversion)."""
+    for upstream, dest in VENDORED_DUPLICATES:
+        if dry_run:
+            print(f"  [dry] duplicate_repo({upstream!r} → {dest!r})")
+            continue
+        try:
+            api.model_info(dest)
+            print(f"  ✓ already exists: {dest}")
+            continue
+        except Exception:
+            pass
+        print(f"  ↻ duplicating {upstream} → {dest}", flush=True)
+        api.duplicate_repo(from_id=upstream, to_id=dest, repo_type="model")
+        print(f"  ✓ done: https://huggingface.co/{dest}")
+
+
+def _recast_safetensors(src: Path, dst: Path, dtype) -> None:
+    """Copy `src` → `dst`, recasting every *.safetensors tensor to `dtype`.
+
+    Non-tensor files are copied verbatim.
+    """
+    import shutil
+
+    from safetensors.torch import load_file, save_file
+
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in sorted(src.iterdir()):
+        out = dst / item.name
+        if item.is_dir():
+            _recast_safetensors(item, out, dtype)
+        elif item.suffix == ".safetensors":
+            tensors = {k: v.to(dtype) for k, v in load_file(str(item)).items()}
+            save_file(tensors, str(out))
+        else:
+            shutil.copy2(item, out)
+
+
+def build_shared_encoders(api: HfApi, *, dry_run: bool) -> None:
+    import tempfile
+    import torch
+    from pathlib import Path
+    from huggingface_hub import snapshot_download
+    print(f"[shared] -> {SHARED_MIRROR}")
+    if dry_run:
+        for c in SHARED_ENCODERS:
+            print(f"  {c.source_repo}:{c.source_subfolder} -> {c.dest_subfolder} ({c.dtype})")
+        return
+    if api.repo_exists(SHARED_MIRROR):
+        print(f"  [skip] {SHARED_MIRROR} exists"); return
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        for c in SHARED_ENCODERS:
+            snapshot_download(c.source_repo, allow_patterns=[f"{c.source_subfolder}/*"], local_dir=out / "_src")
+            (out / c.dest_subfolder).parent.mkdir(parents=True, exist_ok=True)
+            # text_encoder/vae are dtype-recast; image_* copied as-is fp32
+            src = out / "_src" / c.source_subfolder
+            if c.dtype == "bfloat16":
+                _recast_safetensors(src, out / c.dest_subfolder, torch.bfloat16)
+            else:
+                import shutil; shutil.copytree(src, out / c.dest_subfolder, dirs_exist_ok=True)
+        api.create_repo(SHARED_MIRROR, repo_type="model", exist_ok=True)
+        api.upload_folder(folder_path=str(out), repo_id=SHARED_MIRROR, repo_type="model",
+                          ignore_patterns=["_src/*"])
+    print(f"  [done] {SHARED_MIRROR}")
+
+
+def build_preproc(api: HfApi, *, dry_run: bool) -> None:
+    from pathlib import Path
+    import tempfile
+    from huggingface_hub import hf_hub_download, snapshot_download
+    print(f"[preproc] -> {PREPROC_MIRROR}")
+    if dry_run:
+        for a in PREPROC_ASSETS:
+            print(f"  {a.source_repo}:{a.source_path} -> {a.dest_path}")
+        return
+    if api.repo_exists(PREPROC_MIRROR):
+        print(f"  [skip] {PREPROC_MIRROR} exists"); return
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        for a in PREPROC_ASSETS:
+            dest = out / a.dest_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if a.source_path.endswith("*") or "/" not in a.source_path.rstrip("*"):
+                snapshot_download(a.source_repo, allow_patterns=[a.source_path], local_dir=dest.parent)
+            else:
+                hf_hub_download(a.source_repo, a.source_path, local_dir=out, repo_type="model")
+        api.create_repo(PREPROC_MIRROR, repo_type="model", exist_ok=True)
+        api.upload_folder(folder_path=str(out), repo_id=PREPROC_MIRROR, repo_type="model")
+    print(f"  [done] {PREPROC_MIRROR}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     api = HfApi()
-    print(f"Logged in as: {api.whoami()['name']}")
+    if not args.dry_run:
+        print(f"Logged in as: {api.whoami()['name']}")
 
     print("=== Phase 1 base model duplicates ===")
     duplicate_base(api, args.dry_run)
 
     print("\n=== Phase 1 Lightning LoRA mirror ===")
     build_lightning_mirror(api, args.dry_run)
+
+    print("\n=== Vendored S2V / TI2V mirrors (as-is) ===")
+    duplicate_vendored(api, args.dry_run)
+
+    print("\n=== Shared encoders mirror ===")
+    build_shared_encoders(api, dry_run=args.dry_run)
+
+    print("\n=== Preproc mirror ===")
+    build_preproc(api, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
