@@ -18,7 +18,7 @@ class ModelCard:
     key: str                              # stable id used in UI dispatch
     generation: Generation
     mode: Mode
-    repo: str                             # HF repo path
+    repo: str                             # upstream HF repo path (fp32)
     size: str                             # "1.3B" / "14B" / "5B" / "A14B" / etc.
     native_resolutions: tuple[str, ...]   # e.g. ("480p",) or ("480p", "720p")
     native_fps: int
@@ -36,8 +36,14 @@ class ModelCard:
     quality_guidance: float
     flow_shift: float
     zerogpu_duration: int                 # seconds for one run at Fast preset
+    mirror_repo: str = ""                 # bf16 mirror (techfreakworm/<slug>-bf16); defaulted post-init
     quality_guidance_2: float | None = None  # MoE low-noise stage; None for non-MoE
     notes: str = ""
+
+    def __post_init__(self):
+        if not self.mirror_repo:
+            slug = self.key.replace("_", "-")
+            object.__setattr__(self, "mirror_repo", f"techfreakworm/{slug}-bf16")
 
 
 # --------------------------------------------------------------------------------------
@@ -154,6 +160,22 @@ WAN_2_1: list[ModelCard] = [
         quality_steps=30, quality_guidance=5.0, flow_shift=5.0,
         zerogpu_duration=180,
         notes="Quality preset only. VACE not Lightning-trained.",
+    ),
+    ModelCard(
+        key="wan2.1_v2v_14b",
+        generation="wan2.1", mode="v2v",
+        repo="Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        mirror_repo="techfreakworm/wan2.1-t2v-14b-bf16",  # shares the T2V-14B backbone
+        size="14B",
+        native_resolutions=("480p", "720p"), native_fps=16, frames_default=81,
+        diffusers_class="WanVideoToVideoPipeline",
+        is_moe=False, requires_image_encoder=False,
+        lightning_available=False,
+        lightning_lora_repo=None, lightning_high_lora=None, lightning_low_lora=None,
+        lightning_steps=0, lightning_guidance=0.0,
+        quality_steps=40, quality_guidance=5.0, flow_shift=5.0,  # 720p; 3.0 for 480p
+        zerogpu_duration=90,
+        notes="Restyle on the T2V-14B backbone (WanVideoToVideoPipeline). Quality-only.",
     ),
 ]
 
