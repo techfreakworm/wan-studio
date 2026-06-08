@@ -22,6 +22,30 @@ from pipelines.registry import ALL_MODELS, BY_KEY  # noqa: E402
 from provisioning.bf16_plan import conversion_plan  # noqa: E402
 
 
+def _transformer_cls_for(card):
+    """Select the transformer class matching the card's diffusers pipeline.
+
+    VACE and Animate transformers are distinct classes with extra architecture
+    params/submodules (vace_* for VACE; face/motion encoders for Animate), so
+    loading their checkpoints through the base WanTransformer3DModel would fail
+    on config mismatch or silently drop those weights. Everything else (T2V/I2V/
+    FLF2V/V2V) uses the plain WanTransformer3DModel — consistent with the runtime
+    pipelines/t2v.py and pipelines/i2v.py.
+    """
+    from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
+    from diffusers.models.transformers.transformer_wan_vace import (
+        WanVACETransformer3DModel,
+    )
+    from diffusers.models.transformers.transformer_wan_animate import (
+        WanAnimateTransformer3DModel,
+    )
+
+    return {
+        "WanVACEPipeline": WanVACETransformer3DModel,
+        "WanAnimatePipeline": WanAnimateTransformer3DModel,
+    }.get(card.diffusers_class, WanTransformer3DModel)
+
+
 def convert_one(card, *, dry_run: bool) -> None:
     plan = conversion_plan(card)
     if plan is None:
@@ -34,8 +58,9 @@ def convert_one(card, *, dry_run: bool) -> None:
 
     import tempfile
     import torch
-    from huggingface_hub import HfApi, hf_hub_download
-    from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
+    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+
+    transformer_cls = _transformer_cls_for(card)
 
     api = HfApi()
     if api.repo_exists(card.mirror_repo):
@@ -45,12 +70,10 @@ def convert_one(card, *, dry_run: bool) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         for sub in plan.convert_subfolders:
-            t = WanTransformer3DModel.from_pretrained(
+            t = transformer_cls.from_pretrained(
                 card.repo, subfolder=sub, torch_dtype=torch.bfloat16)
             t.save_pretrained(out / sub)
         for sub in plan.keep_subfolders:
-            d = WanTransformer3DModel  # placeholder import guard; use snapshot for subfolders
-            from huggingface_hub import snapshot_download
             snapshot_download(card.repo, allow_patterns=[f"{sub}/*"], local_dir=out)
         for f in plan.keep_files:
             hf_hub_download(card.repo, f, local_dir=out)
