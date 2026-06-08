@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pipelines.registry import ALL_MODELS, BY_KEY
+from pipelines.registry import ALL_MODELS
 
 SHARED_MIRROR = "techfreakworm/wan-shared-encoders"
 PREPROC_MIRROR = "techfreakworm/wan-preproc"
