@@ -17,7 +17,6 @@ from __future__ import annotations
 import os as _os
 _os.environ.setdefault("HF_HUB_CACHE", "/tmp/hf_cache")
 _os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
-_os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 _os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 try:
     _os.makedirs("/tmp/hf_cache", exist_ok=True)
