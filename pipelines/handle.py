@@ -311,3 +311,33 @@ class WanModelHandle:
                 adapter_name="lightning_low",
                 load_into_transformer_2=True,  # diffusers PR #12074
             )
+
+
+class ModelRegistry:
+    """Holds at-most-one warmed handle. Switching keys evicts the prior one.
+
+    factory(key) -> WanModelHandle builds a fresh handle for a registry key
+    (injected so tests can stub it; production passes the HANDLER_REGISTRY
+    builder).
+    """
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._handles: dict[str, WanModelHandle] = {}
+        self.warm_key: str | None = None
+
+    def acquire(self, key: str) -> WanModelHandle:
+        if key not in BY_KEY:
+            raise KeyError(f"Unknown model key: {key!r}")
+        if self.warm_key == key and key in self._handles:
+            return self._handles[key]
+        if self.warm_key is not None and self.warm_key != key:
+            prev = self._handles.get(self.warm_key)
+            if prev is not None:
+                prev.unload_to_cpu()
+                tier2_evict(_slug_for(prev.card))
+        handle = self._handles.get(key) or self._factory(key)
+        handle.ensure_loaded()
+        self._handles[key] = handle
+        self.warm_key = key
+        return handle
