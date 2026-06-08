@@ -33,3 +33,11 @@ def test_no_duplicate_mount_paths():
 
 def test_expected_mount_paths_helper_matches_volumes():
     assert set(manifest.expected_mount_paths()) == {v.mount_path for v in manifest.all_volumes()}
+
+
+def test_create_space_uses_full_manifest():
+    """create_space must build its Volume list from manifest.all_volumes() (atomic replace)."""
+    import scripts.create_space as cs
+    specs = cs.build_volume_specs()          # returns the manifest VolumeSpecs
+    from provisioning.manifest import all_volumes
+    assert {v.mount_path for v in specs} == {v.mount_path for v in all_volumes()}
