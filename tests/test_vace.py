@@ -32,3 +32,10 @@ def test_vace_handle_card_quality_only():
     assert h.card.lightning_available is False
     assert h.card.requires_image_encoder is False
     assert h.pipe is None
+
+
+def test_vace_flow_shift_picks_by_resolution():
+    """VACE-14B card flow_shift is 5.0 (720p) but must drop to 3.0 at 480p (risk R24)."""
+    from pipelines.vace import flow_shift_for
+    assert flow_shift_for("wan2.1_vace_14b", height=480) == 3.0
+    assert flow_shift_for("wan2.1_vace_14b", height=720) == 5.0

@@ -17,6 +17,11 @@ from pipelines.handlers import HandlerSpec, register
 from utils.backend import detect
 
 
+def flow_shift_for(card_key: str, *, height: int) -> float:
+    """VACE flow_shift: 3.0 at 480p, 5.0 at 720p (registry stores the 720p value)."""
+    return 3.0 if height <= 480 else 5.0
+
+
 class VACEHandle(WanModelHandle):
     def _build_pipeline(self) -> Any:
         backend = detect()
@@ -44,6 +49,13 @@ class VACEHandle(WanModelHandle):
         preset_kwargs: dict,
     ) -> list:
         self.ensure_loaded()
+        # WanVACEPipeline.__call__ has no flow_shift kwarg → reconfigure the
+        # scheduler per request (3.0 at 480p, 5.0 at 720p; risk R24).
+        from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+        self.pipe.scheduler = UniPCMultistepScheduler.from_config(
+            self.pipe.scheduler.config,
+            flow_shift=flow_shift_for(self.card.key, height=height),
+        )
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
         out = self.pipe(
             prompt=prompt,
