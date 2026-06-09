@@ -60,6 +60,13 @@ def test_flf2v_and_v2v_are_wired_not_toast():
     assert "v2v" in app._MODE_RUNNERS
 
 
+def test_vace_is_wired_not_toast():
+    """After registration + Task 3 wiring, the VACE Generate button routes to a
+    real runner (not _generate_toast)."""
+    assert "vace" in HANDLER_REGISTRY
+    assert "vace" in app._MODE_RUNNERS
+
+
 def test_ui_dispatch_arg_order_aligns_for_v2v_and_flf2v():
     """The fragile, untested property: the positional shape `_inputs_for` builds
     must line up with `_ui_dispatch`'s index reads. Both v2v/flf2v carry the

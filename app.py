@@ -269,6 +269,11 @@ def _ui_dispatch(mode: str, ui_args: tuple) -> tuple[str, str, float]:
         # (start_frame, generation, preset, end_uploaded, end_generated, ...) —
         # no resolution dropdown; FLF2V is an 81-frame (~5s) fixed clip.
         return ui_args[1], "", 5.0
+    if mode == "vace":
+        # (submode, generation, preset, source_video, references, prompt, ...) —
+        # no resolution dropdown; default ~4s reserve (length comes from the
+        # source video at runtime, falling back to 81 frames).
+        return ui_args[1], "", 4.0
     # t2v: (prompt, generation, preset, resolution, duration, ...)
     return ui_args[1], ui_args[3], ui_args[4]
 
@@ -505,8 +510,67 @@ def _run_flf2v(spec, ui_args, progress):
     return _export(out, "flf2v", pk.fallback_message)
 
 
+def _run_vace(spec, ui_args, progress):
+    """VACE body: resolve the sub-mode → build video/mask/reference_images via the
+    pure builders, then run WanVACEPipeline. Wan 2.1, Quality-only. Control-extraction
+    sub-modes (Depth/Pose/Sketch/Flow) take the uploaded source AS the control video in
+    v1 (auto-extraction is #1b-preproc); deferred sub-modes raise an actionable error."""
+    import random
+    from pipelines.vace_inputs import gallery_to_references, resolve_submode
+    from pipelines.video_io import decode_video
+
+    (submode, generation, preset_label, source_video, references, prompt,
+     negative_prompt, seed, randomize, steps, cfg, cfg_2) = ui_args
+
+    if not str(prompt or "").strip():
+        raise gr.Error("Prompt is required.")
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    handle = REGISTRY.acquire(_key_for(spec.mode, generation))
+    progress(0.05, desc="Configuring preset…")
+    pk = handle.configure_preset(_coerce_preset(preset_label))
+
+    refs = gallery_to_references(references)
+    src_frames, h, w = None, 480, 832
+    if source_video:
+        progress(0.15, desc="Decoding source video…")
+        src_frames, h, w = decode_video(source_video, handle.pipe, 480 * 832)
+
+    try:
+        plan = resolve_submode(
+            submode, source_frames=src_frames, references=refs,
+            height=h, width=w, num_frames=(len(src_frames) if src_frames else 81),
+        )
+    except ValueError as e:
+        raise gr.Error(str(e))
+
+    num_frames = len(plan.video) if plan.video else 81
+    inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
+
+    progress(0.2, desc="Generating frames…")
+    out = handle.generate(
+        prompt=prompt,
+        video=plan.video,
+        mask=plan.mask,
+        reference_images=plan.reference_images,
+        negative_prompt=negative_prompt or "",
+        height=h,
+        width=w,
+        num_frames=num_frames,
+        seed=int(seed),
+        preset_kwargs=inf,
+    )
+
+    progress(0.9, desc="Encoding MP4…")
+    return _export(out, "vace", pk.fallback_message)
+
+
 # Per-mode body dispatch. Append-only: a new wired mode adds its `_run_*` here.
-_MODE_RUNNERS = {"t2v": _run_t2v, "i2v": _run_i2v, "flf2v": _run_flf2v, "v2v": _run_v2v}
+_MODE_RUNNERS = {
+    "t2v": _run_t2v, "i2v": _run_i2v, "flf2v": _run_flf2v, "v2v": _run_v2v,
+    "vace": _run_vace,
+}
 
 
 def _run(spec, *ui_args, progress=None):
@@ -1947,6 +2011,18 @@ def build() -> gr.Blocks:
                     hdr["preset_state"],
                     tab_in["end_frame_uploaded"],
                     tab_in["end_frame_generated"],
+                    tab_in["prompt"],
+                ] + _advanced_inputs(tab_in)
+            # VACE: (submode, generation, preset, source_video, references,
+            #        prompt, *advanced). mask_source/mask_input drive the
+            #        deferred-mode UX only and are NOT threaded to the runner in v1.
+            if mode == "vace":
+                return [
+                    tab_in["submode"],
+                    hdr["generation"],
+                    hdr["preset_state"],
+                    tab_in["source_video"],
+                    tab_in["references"],
                     tab_in["prompt"],
                 ] + _advanced_inputs(tab_in)
             lead = [tab_in["image"], tab_in["prompt"]] if mode == "i2v" else [tab_in["prompt"]]
