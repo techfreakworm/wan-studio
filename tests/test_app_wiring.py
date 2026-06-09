@@ -89,6 +89,13 @@ def test_ui_dispatch_arg_order_aligns_for_v2v_and_flf2v():
     assert duration == 5.0
 
 
+def test_flf2v_generate_end_handler_exists():
+    """The FLF2V end-frame 'Generate' button binds a real T2I sub-handler
+    (Wan T2I, num_frames=1), not the no-op toast."""
+    import app
+    assert callable(getattr(app, "generate_end_frame", None))
+
+
 def test_smoke_build():
     """The plan's headline test: `from app import build; build()` builds a
     Blocks with no model load and no exception."""

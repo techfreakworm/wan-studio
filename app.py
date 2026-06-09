@@ -543,6 +543,31 @@ def generate_xlarge(mode, *args, progress=gr.Progress(track_tqdm=False)):
     return _run(HANDLER_REGISTRY[mode], *args, progress=progress)
 
 
+@spaces_gpu_or_noop()(duration=lambda *a, **k: 30, size="large")
+def generate_end_frame(end_frame_prompt, generation, progress=gr.Progress(track_tqdm=False)):
+    """Synthesize an FLF2V end frame via Wan T2I (num_frames=1). Returns one frame.
+
+    Runs its own short load→generate→unload on the T2V backbone (risk R21: avoid
+    two 14B transformers warm at once). The LRU registry evicts the warm FLF2V
+    transformer if needed, so the secondary button can't double-load."""
+    if not end_frame_prompt or not str(end_frame_prompt).strip():
+        raise gr.Error("Enter a prompt to generate an end frame.")
+    key = _key_for("t2v", generation)              # reuse the T2V backbone
+    handle = REGISTRY.acquire(key)                 # LRU: evicts the warm transformer if needed
+    progress(0.2, desc="Generating end frame…")
+    pk = handle.configure_preset("quality")
+    frames = handle.generate(
+        prompt=end_frame_prompt,
+        negative_prompt="",
+        height=720,
+        width=1280,
+        num_frames=1,
+        seed=0,
+        preset_kwargs=_build_inference_kwargs(pk, 0, 0, 0),
+    )
+    return frames[0]                               # single frame → gr.Image
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Theme — Linear-faithful warm near-black palette with electric-blue accent.
 # Built off gr.themes.Base (lowest preset noise) and overridden in CSS below.
@@ -1947,9 +1972,16 @@ def build() -> gr.Blocks:
                 )
             elif "generate" in tab_in:
                 tab_in["generate"].click(fn=_generate_toast, inputs=None, outputs=None)
-        # FLF2V has a secondary "Generate end frame" button.
+        # FLF2V has a secondary "Generate end frame" button → real Wan T2I
+        # sub-handler (num_frames=1). Bound directly (not via the HANDLER_REGISTRY
+        # loop) so it does not double-fire the toast.
         if "inputs" in tabs.get("flf2v", {}) and "generate_end" in tabs["flf2v"]["inputs"]:
-            tabs["flf2v"]["inputs"]["generate_end"].click(fn=_generate_toast, inputs=None, outputs=None)
+            flf2v_in = tabs["flf2v"]["inputs"]
+            flf2v_in["generate_end"].click(
+                fn=generate_end_frame,
+                inputs=[flf2v_in["end_frame_prompt"], header["generation"]],
+                outputs=[flf2v_in["end_frame_generated"]],
+            )
 
         # Still referenced by the cfg_2 visibility toggle below.
         t2v_in = tabs["t2v"]["inputs"]
