@@ -510,6 +510,24 @@ def _run_flf2v(spec, ui_args, progress):
     return _export(out, "flf2v", pk.fallback_message)
 
 
+def _snap_vace_frames(seq, num_frames):
+    """Trim or pad a conditioning frame list to exactly `num_frames` items.
+
+    WanVACEPipeline rounds num_frames DOWN to the nearest 4k+1 but keeps every
+    conditioning frame, so a raw clip length (e.g. 150) leaves video/mask longer
+    than the noise latents → the control signal misaligns vs the latents. We snap
+    the lists to the same 4k+1 length the pipeline will use: trim the tail when
+    too long, repeat the last frame when too short (only when num_frames slightly
+    exceeds a short clip)."""
+    if not seq:
+        return seq
+    if len(seq) > num_frames:
+        return seq[:num_frames]
+    if len(seq) < num_frames:
+        return seq + [seq[-1]] * (num_frames - len(seq))
+    return seq
+
+
 def _run_vace(spec, ui_args, progress):
     """VACE body: resolve the sub-mode → build video/mask/reference_images via the
     pure builders, then run WanVACEPipeline. Wan 2.1, Quality-only. Control-extraction
@@ -545,18 +563,38 @@ def _run_vace(spec, ui_args, progress):
     except ValueError as e:
         raise gr.Error(str(e))
 
-    num_frames = len(plan.video) if plan.video else 81
+    # Snap num_frames to the 4k+1 the pipeline enforces (vae_scale_factor_temporal)
+    # and trim/extend video+mask to MATCH it. Otherwise the pipeline silently rounds
+    # num_frames down but keeps every conditioning frame → conditioning_latents has
+    # more temporal frames than the noise latents and the control signal misaligns
+    # (pipeline_wan_vace.py:836-840 / 941 warn-only). video/mask are already equal-length.
+    raw_n = len(plan.video) if plan.video else 81
+    vsft = getattr(handle.pipe, "vae_scale_factor_temporal", 4) or 4
+    num_frames = max(raw_n // vsft * vsft + 1, 1)
+    plan_video = _snap_vace_frames(plan.video, num_frames)
+    plan_mask = _snap_vace_frames(plan.mask, num_frames)
+
+    # Outpaint (and any sub-mode that changes frame dims) enlarges the canvas to
+    # (w+2*pad, h+2*pad). Pass the PADDED dims to generate so the area budget keeps
+    # the enlarged canvas; passing the original h,w lets preprocess_conditions'
+    # area-budget rescale (pipeline_wan_vace.py:434-436) shrink it back, squeezing
+    # the extension instead of enlarging the frame.
+    out_h, out_w = h, w
+    if plan_video:
+        pw, ph = plan_video[0].size  # PIL .size is (width, height)
+        out_h, out_w = ph, pw
+
     inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
 
     progress(0.2, desc="Generating frames…")
     out = handle.generate(
         prompt=prompt,
-        video=plan.video,
-        mask=plan.mask,
+        video=plan_video,
+        mask=plan_mask,
         reference_images=plan.reference_images,
         negative_prompt=negative_prompt or "",
-        height=h,
-        width=w,
+        height=out_h,
+        width=out_w,
         num_frames=num_frames,
         seed=int(seed),
         preset_kwargs=inf,

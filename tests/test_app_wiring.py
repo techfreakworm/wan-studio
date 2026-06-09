@@ -67,12 +67,13 @@ def test_vace_is_wired_not_toast():
     assert "vace" in app._MODE_RUNNERS
 
 
-def test_ui_dispatch_arg_order_aligns_for_v2v_and_flf2v():
+def test_ui_dispatch_arg_order_aligns_for_v2v_flf2v_and_vace():
     """The fragile, untested property: the positional shape `_inputs_for` builds
-    must line up with `_ui_dispatch`'s index reads. Both v2v/flf2v carry the
+    must line up with `_ui_dispatch`'s index reads. v2v/flf2v/vace all carry the
     `generation` at ui_args[1]; v2v has no resolution + a ~3s reserve, flf2v has
-    no resolution + a fixed ~5s clip. Feed positionally-shaped tuples (mirroring
-    the `_inputs_for` order) and assert the read-back (generation, _, duration).
+    no resolution + a fixed ~5s clip, vace has no resolution + a ~4s reserve. Feed
+    positionally-shaped tuples (mirroring the `_inputs_for` order) and assert the
+    read-back (generation, _, duration).
     """
     # V2V layout: (video, generation, preset, prompt, strength, *advanced).
     v2v_args = (
@@ -94,6 +95,17 @@ def test_ui_dispatch_arg_order_aligns_for_v2v_and_flf2v():
     assert generation == "wan2.1"
     assert resolution == ""
     assert duration == 5.0
+
+    # VACE layout: (submode, generation, preset, source_video, references,
+    #               prompt, *advanced).
+    vace_args = (
+        "Depth", "wan2.1", "quality", "source.mp4", None, "vace prompt",
+        "neg", 1234, False, 0, 0.0, 0.0,
+    )
+    generation, resolution, duration = app._ui_dispatch("vace", vace_args)
+    assert generation == "wan2.1"
+    assert resolution == ""
+    assert duration == 4.0
 
 
 def test_flf2v_generate_end_handler_exists():
