@@ -1822,7 +1822,11 @@ def build() -> gr.Blocks:
         WIRED = set(HANDLER_REGISTRY)
         for mode, tab in tabs.items():
             tab_in = tab.get("inputs", {})
-            if mode in WIRED and "generate" in tab_in:
+            # `_inputs_for` only knows the resolution/duration-bearing tab shape
+            # (t2v/i2v). Modes registered for inference but lacking that shape
+            # (e.g. v2v) stay on the no-op toast until their runner + per-mode
+            # `_inputs_for` branch land in a later wave.
+            if mode in WIRED and "generate" in tab_in and "resolution" in tab_in:
                 spec = HANDLER_REGISTRY[mode]
                 entry = generate_xlarge if spec.tier == "xlarge" else generate_large
                 tab_in["generate"].click(
