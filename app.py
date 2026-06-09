@@ -261,6 +261,14 @@ def _ui_dispatch(mode: str, ui_args: tuple) -> tuple[str, str, float]:
     if mode == "i2v":
         # (image, prompt, generation, preset, resolution, duration, ...)
         return ui_args[2], ui_args[4], ui_args[5]
+    if mode == "v2v":
+        # (video, generation, preset, prompt, strength, ...) — no resolution
+        # dropdown; fixed ~3s reserve so _get_duration scales sanely.
+        return ui_args[1], "", 3.0
+    if mode == "flf2v":
+        # (start_frame, generation, preset, end_uploaded, end_generated, ...) —
+        # no resolution dropdown; FLF2V is an 81-frame (~5s) fixed clip.
+        return ui_args[1], "", 5.0
     # t2v: (prompt, generation, preset, resolution, duration, ...)
     return ui_args[1], ui_args[3], ui_args[4]
 
@@ -285,12 +293,26 @@ def _build_inference_kwargs(preset_kwargs, steps_override, cfg_override, cfg_2_o
     return inference_kwargs
 
 
+def _export(frames, mode: str, fallback_message: str = "") -> str:
+    """Encode generated frames to a temp MP4 (`wan_<mode>_*.mp4`, fps=16) and,
+    when a Fast→Quality fallback was applied, surface the message as a toast.
+    Shared by every `_run_<mode>` runner."""
+    import os
+    import tempfile
+    from diffusers.utils import export_to_video
+
+    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix=f"wan_{mode}_")
+    os.close(fd)
+    export_to_video(frames, out_path, fps=16)
+    if fallback_message:
+        gr.Info(fallback_message, duration=8)
+    return out_path
+
+
 def _run_t2v(spec, ui_args, progress):
     """T2V body: resolve key → acquire (LRU) → configure preset → generate →
     export. Behaviour-identical to the prior `generate_t2v` closure."""
     import random
-    import tempfile
-    from diffusers.utils import export_to_video
 
     (prompt, generation, preset_label, resolution_label, duration_s,
      negative_prompt, seed, randomize, steps_override, cfg_override,
@@ -342,21 +364,13 @@ def _run_t2v(spec, ui_args, progress):
     )
 
     progress(0.9, desc="Encoding MP4…")
-    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_t2v_")
-    os.close(fd)
-    export_to_video(frames, out_path, fps=16)
-
-    if preset_kwargs.fallback_message:
-        gr.Info(preset_kwargs.fallback_message, duration=8)
-    return out_path
+    return _export(frames, "t2v", preset_kwargs.fallback_message)
 
 
 def _run_i2v(spec, ui_args, progress):
     """I2V body: auto-picks the checkpoint by (generation × resolution) and
     coerces filepath → PIL.Image. Behaviour-identical to `generate_i2v`."""
     import random
-    import tempfile
-    from diffusers.utils import export_to_video
     from PIL import Image
 
     (image, prompt, generation, preset_label, resolution_label, duration_s,
@@ -403,17 +417,90 @@ def _run_i2v(spec, ui_args, progress):
     )
 
     progress(0.9, desc="Encoding MP4…")
-    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_i2v_")
-    os.close(fd)
-    export_to_video(frames, out_path, fps=16)
+    return _export(frames, "i2v", preset_kwargs.fallback_message)
 
-    if preset_kwargs.fallback_message:
-        gr.Info(preset_kwargs.fallback_message, duration=8)
-    return out_path
+
+def _run_v2v(spec, ui_args, progress):
+    """V2V body: decode the source video to PIL frames on the VAE grid, then
+    restyle via WanVideoToVideoPipeline (video + strength). Wan 2.1, Quality-only."""
+    import random
+    from pipelines.video_io import decode_video
+
+    (video, generation, preset_label, prompt, strength,
+     negative_prompt, seed, randomize, steps, cfg, cfg_2) = ui_args
+
+    if not video:
+        raise gr.Error("Please upload a video.")
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("Restyle prompt is required.")
+
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    handle = REGISTRY.acquire(_key_for(spec.mode, generation))
+    progress(0.05, desc="Configuring preset…")
+    pk = handle.configure_preset(_coerce_preset(preset_label))
+    inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
+
+    progress(0.2, desc="Decoding source video…")
+    frames_in, _, _ = decode_video(video, handle.pipe, 480 * 832)
+
+    progress(0.3, desc="Restyling frames…")
+    out = handle.generate(
+        frames_in,
+        prompt,
+        negative_prompt=negative_prompt or "",
+        strength=float(strength),
+        seed=int(seed),
+        preset_kwargs=inf,
+    )
+
+    progress(0.9, desc="Encoding MP4…")
+    return _export(out, "v2v", pk.fallback_message)
+
+
+def _run_flf2v(spec, ui_args, progress):
+    """FLF2V body: first + last frame → 81-frame transition via WanImageToVideoPipeline
+    (last_image=). End frame may be uploaded or T2I-generated. Wan 2.1 720p-locked."""
+    import random
+
+    (start_frame, generation, preset_label, end_uploaded, end_generated, prompt,
+     negative_prompt, seed, randomize, steps, cfg, cfg_2) = ui_args
+
+    if start_frame is None:
+        raise gr.Error("Please provide a start frame.")
+    last = end_uploaded if end_uploaded is not None else end_generated
+    if last is None:
+        raise gr.Error("Please upload or generate an end frame.")
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("Transition prompt is required.")
+
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    handle = REGISTRY.acquire(_key_for(spec.mode, generation))
+    progress(0.05, desc="Configuring preset…")
+    pk = handle.configure_preset(_coerce_preset(preset_label))
+    # FLF2V Quality default CFG 5.5 when the user didn't override.
+    cfg_eff = cfg if (cfg and float(cfg) > 0) else 5.5
+    inf = _build_inference_kwargs(pk, steps, cfg_eff, cfg_2)
+
+    progress(0.2, desc="Generating frames…")
+    out = handle.generate(
+        start_frame,
+        last,
+        prompt,
+        negative_prompt=negative_prompt or "",
+        seed=int(seed),
+        preset_kwargs=inf,
+    )
+
+    progress(0.9, desc="Encoding MP4…")
+    return _export(out, "flf2v", pk.fallback_message)
 
 
 # Per-mode body dispatch. Append-only: a new wired mode adds its `_run_*` here.
-_MODE_RUNNERS = {"t2v": _run_t2v, "i2v": _run_i2v}
+_MODE_RUNNERS = {"t2v": _run_t2v, "i2v": _run_i2v, "flf2v": _run_flf2v, "v2v": _run_v2v}
 
 
 def _run(spec, *ui_args, progress=None):
@@ -1811,6 +1898,26 @@ def build() -> gr.Blocks:
         # from the header + resolution/duration from the tab, then advanced).
         def _inputs_for(mode: str, tab: dict, hdr: dict) -> list:
             tab_in = tab["inputs"]
+            # V2V: (video, generation, preset, prompt, strength, *advanced).
+            if mode == "v2v":
+                return [
+                    tab_in["video"],
+                    hdr["generation"],
+                    hdr["preset_state"],
+                    tab_in["prompt"],
+                    tab_in["strength"],
+                ] + _advanced_inputs(tab_in)
+            # FLF2V: (start_frame, generation, preset, end_uploaded,
+            #         end_generated, prompt, *advanced).
+            if mode == "flf2v":
+                return [
+                    tab_in["start_frame"],
+                    hdr["generation"],
+                    hdr["preset_state"],
+                    tab_in["end_frame_uploaded"],
+                    tab_in["end_frame_generated"],
+                    tab_in["prompt"],
+                ] + _advanced_inputs(tab_in)
             lead = [tab_in["image"], tab_in["prompt"]] if mode == "i2v" else [tab_in["prompt"]]
             return lead + [
                 hdr["generation"],
@@ -1819,14 +1926,12 @@ def build() -> gr.Blocks:
                 tab_in["duration"],
             ] + _advanced_inputs(tab_in)
 
+        # A mode wires to a real handler iff `_inputs_for` knows its layout
+        # (i.e. it's in HANDLER_REGISTRY); otherwise it stays on the no-op toast.
         WIRED = set(HANDLER_REGISTRY)
         for mode, tab in tabs.items():
             tab_in = tab.get("inputs", {})
-            # `_inputs_for` only knows the resolution/duration-bearing tab shape
-            # (t2v/i2v). Modes registered for inference but lacking that shape
-            # (e.g. v2v) stay on the no-op toast until their runner + per-mode
-            # `_inputs_for` branch land in a later wave.
-            if mode in WIRED and "generate" in tab_in and "resolution" in tab_in:
+            if mode in WIRED and "generate" in tab_in:
                 spec = HANDLER_REGISTRY[mode]
                 entry = generate_xlarge if spec.tier == "xlarge" else generate_large
                 tab_in["generate"].click(

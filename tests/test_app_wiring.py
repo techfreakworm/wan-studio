@@ -52,6 +52,16 @@ def test_t2v_and_i2v_modes_are_wired_from_registry():
     assert "i2v" in HANDLER_REGISTRY
 
 
+def test_flf2v_and_v2v_are_wired_not_toast():
+    """After registration, flf2v/v2v Generate buttons route to a runner, not _generate_toast."""
+    import app
+    from pipelines.handlers import HANDLER_REGISTRY
+    assert "flf2v" in HANDLER_REGISTRY
+    assert "v2v" in HANDLER_REGISTRY
+    assert "flf2v" in app._MODE_RUNNERS
+    assert "v2v" in app._MODE_RUNNERS
+
+
 def test_smoke_build():
     """The plan's headline test: `from app import build; build()` builds a
     Blocks with no model load and no exception."""
