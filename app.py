@@ -528,6 +528,18 @@ def _snap_vace_frames(seq, num_frames):
     return seq
 
 
+def _vace_spatial_base(pipe):
+    """The spatial divisibility unit WanVACEPipeline.check_inputs enforces on
+    height/width: vae_scale_factor_spatial * transformer.patch_size[1] (8 * 2 = 16
+    for Wan 2.1). Derived from the pipe so it tracks the actual loaded config; falls
+    back to 16 when the transformer/vae aren't introspectable."""
+    spatial = getattr(pipe, "vae_scale_factor_spatial", None) or 8
+    transformer = getattr(pipe, "transformer", None) or getattr(pipe, "transformer_2", None)
+    patch = getattr(getattr(transformer, "config", None), "patch_size", None)
+    psize = patch[1] if patch else 2
+    return (spatial * psize) or 16
+
+
 def _run_vace(spec, ui_args, progress):
     """VACE body: resolve the sub-mode → build video/mask/reference_images via the
     pure builders, then run WanVACEPipeline. Wan 2.1, Quality-only. Control-extraction
@@ -583,6 +595,14 @@ def _run_vace(spec, ui_args, progress):
     if plan_video:
         pw, ph = plan_video[0].size  # PIL .size is (width, height)
         out_h, out_w = ph, pw
+    # The padded outpaint canvas (h+2*(h//4)) is only guaranteed %8, but check_inputs
+    # hard-raises unless height/width are %base (16 for Wan 2.1). Snap DOWN to the same
+    # base the pipeline uses so a non-480x832 aspect ratio (e.g. 624x624 -> 936x936,
+    # 936%16==8) no longer ValueErrors before generation — it loses at most base-1 px
+    # of the extension, which the model regenerates anyway, vs the pre-commit squeeze.
+    base = _vace_spatial_base(handle.pipe)
+    out_h = max(out_h // base * base, base)
+    out_w = max(out_w // base * base, base)
 
     inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
 

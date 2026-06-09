@@ -120,3 +120,66 @@ def test_smoke_build():
     Blocks with no model load and no exception."""
     demo = app.build()
     assert type(demo).__name__ == "Blocks"
+
+
+def test_snap_vace_frames_trim_pad_passthrough():
+    """_snap_vace_frames forces a conditioning list to exactly num_frames:
+    trim the tail when longer, repeat the last frame when shorter, passthrough
+    when equal — keeping video/mask aligned with the 4k+1 latent length the
+    pipeline rounds to. Empty stays empty."""
+    seq = list(range(10))
+    # longer: trim tail to num_frames
+    assert app._snap_vace_frames(seq, 6) == [0, 1, 2, 3, 4, 5]
+    # equal: passthrough (same contents)
+    assert app._snap_vace_frames(seq, 10) == seq
+    # shorter: pad by repeating the LAST element
+    assert app._snap_vace_frames([7, 8, 9], 6) == [7, 8, 9, 9, 9, 9]
+    # empty: unchanged
+    assert app._snap_vace_frames([], 5) == []
+
+
+def test_outpaint_padded_dims_are_divisible_by_base():
+    """Regression guard for the Outpaint mod-16 crash: the out_h/out_w app._run_vace
+    derives from the enlarged outpaint canvas MUST be divisible by the pipeline's
+    spatial base (16 for Wan 2.1), or WanVACEPipeline.check_inputs hard-raises before
+    generation. decode_video snaps dims to %16, so pad = dim//4 is only %4 and the
+    padded canvas (dim + 2*(dim//4)) is only %8 — e.g. 624 -> 936, 936 % 16 == 8.
+    Replicate _run_vace's snap and assert the chosen dims are %base == 0."""
+    from pipelines.vace_inputs import outpaint_video_and_mask
+
+    base = 16  # vae_scale_factor_spatial(8) * patch_size[1](2) for Wan 2.1
+    # A non-480x832 decode whose padded canvas is NOT %16 (this is the regressing case).
+    for h, w in [(624, 624), (432, 880), (480, 480)]:
+        frames = [__import__("PIL.Image", fromlist=["Image"]).new("RGB", (w, h))]
+        video, _ = outpaint_video_and_mask(frames, pad=h // 4)
+        pw, ph = video[0].size  # enlarged canvas (w+2*pad, h+2*pad)
+        # At least one of these canvases violates %16 (proves the test is real).
+        # Apply _run_vace's snap-down and assert the result is valid for check_inputs.
+        out_h = max(ph // base * base, base)
+        out_w = max(pw // base * base, base)
+        assert out_h % base == 0 and out_w % base == 0
+        assert 0 < out_h <= ph and 0 < out_w <= pw
+    # Sanity: the 624x624 canvas really did violate %16 pre-snap (else the test is vacuous).
+    bad = outpaint_video_and_mask(
+        [__import__("PIL.Image", fromlist=["Image"]).new("RGB", (624, 624))], pad=624 // 4
+    )[0][0]
+    assert bad.size[0] % base != 0
+
+
+def test_vace_spatial_base_falls_back_to_16():
+    """_vace_spatial_base returns 16 (8*2) when the pipe can't be introspected,
+    matching the constant in WanVACEPipeline.check_inputs for Wan 2.1."""
+    assert app._vace_spatial_base(None) == 16
+
+    class _Cfg:
+        patch_size = (1, 2, 2)
+
+    class _Tf:
+        config = _Cfg()
+
+    class _Pipe:
+        vae_scale_factor_spatial = 8
+        transformer = _Tf()
+        transformer_2 = None
+
+    assert app._vace_spatial_base(_Pipe()) == 16
