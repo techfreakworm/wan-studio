@@ -157,7 +157,9 @@ def build_flf2v_tab() -> dict:
                             gr.Markdown("Synthesize end frame from a prompt (T2I).")
                             end_frame_prompt = gr.Textbox(label="End-frame prompt", lines=2)
                             generate_end = gr.Button("Generate end frame", size="sm")
-                            end_frame_generated = gr.Image(label="Generated end frame", height=200)
+                            end_frame_generated = gr.Image(
+                                type="pil", label="Generated end frame", height=200,
+                            )
             prompt = gr.Textbox(
                 label="Transition prompt", lines=3,
                 placeholder="A penguin spreads its wings and takes flight (中文 hint)...",

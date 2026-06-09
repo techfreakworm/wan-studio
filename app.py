@@ -469,11 +469,11 @@ def _run_flf2v(spec, ui_args, progress):
 
     if start_frame is None:
         raise gr.Error("Please provide a start frame.")
-    # NOTE: end_frame_uploaded is type='pil' (ui/tabs.py) so center_crop_resize's
-    # image.convert('RGB') is safe today. end_frame_generated has no type= and
-    # defaults to numpy — unreachable now (generate_end is still the no-op toast
-    # in build(), so it can't be populated), but when the T2I end-frame button is
-    # wired in a later wave, coerce a numpy frame to PIL before passing `last` on.
+    # NOTE: both end-frame inputs are type='pil' (ui/tabs.py) — end_frame_uploaded
+    # and end_frame_generated alike — so center_crop_resize's image.convert('RGB')
+    # gets a PIL.Image, never a raw numpy frame. generate_end IS wired to
+    # generate_end_frame in build(), so end_generated is reachable; type='pil' on
+    # that gr.Image is what coerces the T2V handle's numpy frame to PIL on the way back.
     last = end_uploaded if end_uploaded is not None else end_generated
     if last is None:
         raise gr.Error("Please upload or generate an end frame.")
