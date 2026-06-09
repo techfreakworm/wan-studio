@@ -54,12 +54,39 @@ def test_t2v_and_i2v_modes_are_wired_from_registry():
 
 def test_flf2v_and_v2v_are_wired_not_toast():
     """After registration, flf2v/v2v Generate buttons route to a runner, not _generate_toast."""
-    import app
-    from pipelines.handlers import HANDLER_REGISTRY
     assert "flf2v" in HANDLER_REGISTRY
     assert "v2v" in HANDLER_REGISTRY
     assert "flf2v" in app._MODE_RUNNERS
     assert "v2v" in app._MODE_RUNNERS
+
+
+def test_ui_dispatch_arg_order_aligns_for_v2v_and_flf2v():
+    """The fragile, untested property: the positional shape `_inputs_for` builds
+    must line up with `_ui_dispatch`'s index reads. Both v2v/flf2v carry the
+    `generation` at ui_args[1]; v2v has no resolution + a ~3s reserve, flf2v has
+    no resolution + a fixed ~5s clip. Feed positionally-shaped tuples (mirroring
+    the `_inputs_for` order) and assert the read-back (generation, _, duration).
+    """
+    # V2V layout: (video, generation, preset, prompt, strength, *advanced).
+    v2v_args = (
+        "video.mp4", "wan2.1", "fast", "restyle prompt", 0.6,
+        "neg", 1234, False, 0, 0.0, 0.0,
+    )
+    generation, resolution, duration = app._ui_dispatch("v2v", v2v_args)
+    assert generation == "wan2.1"
+    assert resolution == ""
+    assert duration == 3.0
+
+    # FLF2V layout: (start_frame, generation, preset, end_uploaded,
+    #                end_generated, prompt, *advanced).
+    flf2v_args = (
+        "start.png", "wan2.1", "quality", None, None, "transition prompt",
+        "neg", 1234, False, 0, 0.0, 0.0,
+    )
+    generation, resolution, duration = app._ui_dispatch("flf2v", flf2v_args)
+    assert generation == "wan2.1"
+    assert resolution == ""
+    assert duration == 5.0
 
 
 def test_smoke_build():

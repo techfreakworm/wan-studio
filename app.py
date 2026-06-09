@@ -469,6 +469,11 @@ def _run_flf2v(spec, ui_args, progress):
 
     if start_frame is None:
         raise gr.Error("Please provide a start frame.")
+    # NOTE: end_frame_uploaded is type='pil' (ui/tabs.py) so center_crop_resize's
+    # image.convert('RGB') is safe today. end_frame_generated has no type= and
+    # defaults to numpy — unreachable now (generate_end is still the no-op toast
+    # in build(), so it can't be populated), but when the T2I end-frame button is
+    # wired in a later wave, coerce a numpy frame to PIL before passing `last` on.
     last = end_uploaded if end_uploaded is not None else end_generated
     if last is None:
         raise gr.Error("Please upload or generate an end frame.")
@@ -481,9 +486,10 @@ def _run_flf2v(spec, ui_args, progress):
     handle = REGISTRY.acquire(_key_for(spec.mode, generation))
     progress(0.05, desc="Configuring preset…")
     pk = handle.configure_preset(_coerce_preset(preset_label))
-    # FLF2V Quality default CFG 5.5 when the user didn't override.
-    cfg_eff = cfg if (cfg and float(cfg) > 0) else 5.5
-    inf = _build_inference_kwargs(pk, steps, cfg_eff, cfg_2)
+    # Let the card drive CFG per preset (quality_guidance=5.5 / lightning_guidance=1.0)
+    # exactly like t2v/i2v — no hardcode, so the Fast/Lightning path isn't forced
+    # to a CFG-distilled-hostile 5.5 when the user didn't override.
+    inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
 
     progress(0.2, desc="Generating frames…")
     out = handle.generate(
