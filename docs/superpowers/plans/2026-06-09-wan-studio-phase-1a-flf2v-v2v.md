@@ -140,7 +140,10 @@ git commit -m "Add video_io helpers: center_crop_resize + decode_video"
 **Files:**
 - Create: `pipelines/v2v.py`
 - Modify: `pipelines/__init__.py`
+- Modify: `app.py` — **necessary one-line guard** (see note below)
 - Test: `tests/test_v2v.py`
+
+> **Scope note (execution finding):** Self-registering `v2v` adds it to `HANDLER_REGISTRY`, which the `build()` wiring loop iterates. That loop calls `_inputs_for(mode, …)`, which only knows the resolution/duration-bearing t2v/i2v tab shape — and the v2v tab has no `resolution` key, so an unguarded loop raises `KeyError: 'resolution'`, breaking `build()` and the whole suite at this commit. The full v2v runner + `_inputs_for` branch land in Task 4, so this task adds the **minimal** guard `and "resolution" in tab_in` to the wiring loop to keep v2v on the no-op toast until then. This is the only acceptable in-scope app.py change for Task 2 — it is required for a green commit, not wiring proper (Task 4 replaces it).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -247,15 +250,33 @@ register(HandlerSpec(mode="v2v", handle_cls=V2VHandle, key_for=_v2v_key_for, tie
 
 Add `from pipelines.v2v import V2VHandle  # noqa: F401` (so importing the package self-registers v2v) and append `"V2VHandle"` to `__all__`.
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Add the necessary wiring-loop guard in `app.py`**
+
+Registering v2v above puts it in `HANDLER_REGISTRY`, which `build()`'s wiring loop iterates. Without a guard the loop hits `_inputs_for("v2v", …)`, which assumes the resolution/duration tab shape v2v lacks → `KeyError: 'resolution'`, breaking `build()` and the suite. Add the `resolution` predicate so v2v stays on the no-op toast until Task 4 (its runner + `_inputs_for` branch) lands:
+
+```python
+        for mode, tab in tabs.items():
+            tab_in = tab.get("inputs", {})
+            # `_inputs_for` only knows the resolution/duration-bearing tab shape
+            # (t2v/i2v). Modes registered for inference but lacking that shape
+            # (e.g. v2v) stay on the no-op toast until their runner + per-mode
+            # `_inputs_for` branch land in a later wave.
+            if mode in WIRED and "generate" in tab_in and "resolution" in tab_in:
+```
+
+Verify: `.venv/bin/python -c "from app import build; build(); print('BUILD OK')"`.
+
+- [ ] **Step 6: Run tests**
 
 Run: `.venv/bin/pytest tests/test_v2v.py -v`
-Expected: PASS (3 tests).
+Expected: PASS (3 tests). Then run the full suite to confirm `build()` is green.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
+
+> The `app.py` guard is committed here (not deferred to Task 4) because it is the minimal change required to keep this commit green — see the Files scope note above. Task 4 replaces it with the real v2v wiring.
 
 ```bash
-git add pipelines/v2v.py pipelines/__init__.py tests/test_v2v.py
+git add pipelines/v2v.py pipelines/__init__.py app.py tests/test_v2v.py
 git commit -m "Add V2VHandle (WanVideoToVideoPipeline on t2v-14b mount) + self-register"
 ```
 
@@ -400,6 +421,8 @@ git commit -m "Add FLF2VHandle (I2VHandle + last_image) + self-register"
 - Test: `tests/test_app_wiring.py`
 
 > Read `app.py` `_run_i2v` (the runner template, ~line 354), `_MODE_RUNNERS` (~416), `_inputs_for` (~1812), and `_ui_dispatch` (~257) first. The `.click()` wiring loop already iterates `HANDLER_REGISTRY`, so once `_MODE_RUNNERS` + `_inputs_for` know the new modes, the buttons wire automatically.
+
+> **Carryover from Task 2:** Task 2 already committed a one-line guard in the wiring loop — `if mode in WIRED and "generate" in tab_in and "resolution" in tab_in:` — to keep v2v on the no-op toast (v2v's tab has no `resolution` key, which would `KeyError` in `_inputs_for`). When you give v2v (and flf2v) a real `_inputs_for` branch here, you must **relax/replace that guard** so the now-supported modes pass it; do not leave the `"resolution" in tab_in` predicate blocking them, or they'll stay on the toast and `test_flf2v_and_v2v_are_wired_not_toast` will still pass for the registry assertions but the buttons won't wire. Drive the predicate off "does `_inputs_for` support this mode" rather than a hard-coded `resolution` key.
 
 - [ ] **Step 1: Write the failing test (extend `tests/test_app_wiring.py`)**
 
