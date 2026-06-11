@@ -75,7 +75,7 @@ def stitch_local_dir(card: ModelCard) -> str | None:
     meta = META_ROOT / slug
     stitched = STITCH_ROOT / slug
 
-    if not mount.exists() or not meta.exists():
+    if not mount.exists():
         return None
 
     marker = stitched / ".wan_studio_stitched"
@@ -84,11 +84,17 @@ def stitch_local_dir(card: ModelCard) -> str | None:
 
     stitched.mkdir(parents=True, exist_ok=True)
 
-    # Copy bundled small files first (configs, tokenizer, safetensors.index.json).
-    for src in meta.rglob("*"):
-        if not src.is_file():
+    # Copy the small text files (configs, tokenizer, safetensors.index.json).
+    # Prefer the bundled `models_meta/<slug>/` copies when present — they work
+    # around the HF Volume small-file truncation bug. When no meta is bundled
+    # for this model, copy the small files straight from the mount (relies on
+    # the mount serving them intact; the big weights are symlinked below either
+    # way). This keeps per-model meta optional rather than mandatory.
+    small_src = meta if meta.exists() else mount
+    for src in small_src.rglob("*"):
+        if not src.is_file() or src.suffix.lower() in WEIGHT_EXTS:
             continue
-        rel = src.relative_to(meta)
+        rel = src.relative_to(small_src)
         dst = stitched / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists():
