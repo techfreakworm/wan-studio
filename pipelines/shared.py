@@ -35,7 +35,10 @@ def _shared_path() -> str:
     the persistent HF cache).
     """
     if SHARED_MOUNT.exists():
-        return str(SHARED_MOUNT)
+        # Stitch: small configs fetched from the repo (the mount truncates
+        # sub-1KB JSON like vae/config.json), weights symlinked from the mount.
+        from pipelines.handle import stitch_shared_dir
+        return stitch_shared_dir() or str(SHARED_MOUNT)
     if os.getenv("SPACES_ZERO_GPU") is not None:
         raise RuntimeError(
             f"wan-shared-encoders mount missing at {SHARED_MOUNT} — check create_space.py manifest"

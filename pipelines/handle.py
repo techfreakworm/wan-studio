@@ -55,52 +55,49 @@ def _slug_for(card: ModelCard) -> str:
     return card.key.replace("_", "-")
 
 
-def stitch_local_dir(card: ModelCard) -> str | None:
-    """Build a stitched local dir = mounted weights + bundled JSONs.
+SHARED_MIRROR_REPO = "techfreakworm/wan-shared-encoders"
 
-    Returns the stitched dir path, or None if either the mount or the
-    bundled metadata is missing (e.g. local MPS dev — no /models mount).
 
-    Idempotent: a marker file guards against re-stitching. Once stitched,
-    subsequent calls return the path immediately.
+def _build_stitch(repo: str, mount: Path, name: str) -> str | None:
+    """Stitch a mounted checkpoint into a /tmp dir that from_pretrained can read.
 
-    Big binary files (`.safetensors` etc.) are SYMLINKED from the mount
-    so they cost zero disk on the container's writable layer (the entire
-    point of using space_volumes for model weights). Small text files
-    (JSONs, tokenizer files) are COPIED from `models_meta/<slug>/` because
-    the volume mount serves truncated copies of them.
+    Returns the stitched dir, or None if the mount is absent (local MPS dev →
+    callers fall back to the repo id and let from_pretrained download).
+
+    Idempotent via a marker file. The HF Volume mount TRUNCATES sub-~1 KB JSON
+    config files (verified on the live Space: vae/config.json arrives invalid),
+    so the small text files are fetched fresh from the mirror REPO (always
+    correct, tiny, xet-accelerated) while the big weight files are SYMLINKED
+    from the read-only mount (zero container-disk cost — the whole point of the
+    volume mount). This makes per-model bundled `models_meta/` optional.
     """
-    slug = _slug_for(card)
-    mount = SPACE_MOUNT_ROOT / slug
-    meta = META_ROOT / slug
-    stitched = STITCH_ROOT / slug
-
     if not mount.exists():
         return None
 
+    stitched = STITCH_ROOT / name
     marker = stitched / ".wan_studio_stitched"
     if marker.exists():
         return str(stitched)
 
     stitched.mkdir(parents=True, exist_ok=True)
 
-    # Copy the small text files (configs, tokenizer, safetensors.index.json).
-    # Prefer the bundled `models_meta/<slug>/` copies when present — they work
-    # around the HF Volume small-file truncation bug. When no meta is bundled
-    # for this model, copy the small files straight from the mount (relies on
-    # the mount serving them intact; the big weights are symlinked below either
-    # way). This keeps per-model meta optional rather than mandatory.
-    small_src = meta if meta.exists() else mount
-    for src in small_src.rglob("*"):
-        if not src.is_file() or src.suffix.lower() in WEIGHT_EXTS:
+    # Small files (configs, tokenizer, *.index.json) from the repo — bypasses
+    # the mount truncation bug.
+    from huggingface_hub import hf_hub_download, list_repo_files
+    for f in list_repo_files(repo):
+        if f.startswith(".") or Path(f).suffix.lower() in WEIGHT_EXTS:
             continue
-        rel = src.relative_to(small_src)
-        dst = stitched / rel
+        try:
+            src = hf_hub_download(repo, f)
+        except Exception as e:  # noqa: BLE001 — best-effort per small file
+            print(f"  [stitch] skip {repo}:{f} — {type(e).__name__}: {e}", flush=True)
+            continue
+        dst = stitched / f
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists():
             shutil.copy2(src, dst)
 
-    # Symlink large weight files from the mount.
+    # Big weight files symlinked from the mount.
     for src in mount.rglob("*"):
         if not src.is_file() or src.suffix.lower() not in WEIGHT_EXTS:
             continue
@@ -113,6 +110,19 @@ def stitch_local_dir(card: ModelCard) -> str | None:
 
     marker.touch()
     return str(stitched)
+
+
+def stitch_local_dir(card: ModelCard) -> str | None:
+    """Stitch a model checkpoint mount (small files from card.mirror_repo)."""
+    slug = _slug_for(card)
+    return _build_stitch(card.mirror_repo, SPACE_MOUNT_ROOT / slug, slug)
+
+
+def stitch_shared_dir() -> str | None:
+    """Stitch the shared-encoders mount (UMT5/VAE/CLIP) — configs from the repo,
+    weights symlinked from the mount. Used by pipelines.shared on the Space."""
+    return _build_stitch(SHARED_MIRROR_REPO, SPACE_MOUNT_ROOT / "wan-shared-encoders",
+                         "wan-shared-encoders")
 
 
 def _mount_path(card: ModelCard) -> str:
