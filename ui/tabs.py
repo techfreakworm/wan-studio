@@ -60,11 +60,17 @@ def _advanced_accordion():
             seed = gr.Slider(0, 2**31 - 1, value=42, step=1, label="Seed", scale=4)
             randomize = gr.Checkbox(value=True, label="Randomize", scale=1)
         with gr.Row():
-            steps = gr.Slider(1, 50, value=4, step=1, label="Steps")
-            cfg = gr.Slider(0.0, 10.0, value=1.0, step=0.1, label="CFG")
+            # Default 0 = "use the active preset's resolved value" (the runner
+            # treats a slider as an override only when > 0). Critical: the Fast
+            # preset's steps=4 / CFG=1.0 are LIGHTNING values, but a model with
+            # NO Lightning LoRA (e.g. T2V-1.3B) falls back to Quality (≈50 steps
+            # / CFG 5.0). Hardcoding 4 / 1.0 here clobbered that fallback →
+            # unguided, under-sampled brown mush.
+            steps = gr.Slider(0, 50, value=0, step=1, label="Steps (0 = preset)")
+            cfg = gr.Slider(0.0, 10.0, value=0.0, step=0.1, label="CFG (0 = preset)")
             cfg_2 = gr.Slider(
-                0.0, 10.0, value=1.0, step=0.1,
-                label="CFG (low-noise)", visible=False,  # Wan 2.2 MoE only
+                0.0, 10.0, value=0.0, step=0.1,
+                label="CFG low-noise (0 = preset)", visible=False,  # Wan 2.2 MoE only
             )
     return {
         "negative_prompt": negative_prompt, "seed": seed, "randomize": randomize,
