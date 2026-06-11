@@ -67,3 +67,41 @@ def test_every_manifest_source_has_a_creator():
 
     for v in manifest.all_volumes():
         assert v.source in creatable, f"{v.source} mounted but never created"
+
+
+# ── Subset-deploy (WAN_STUDIO_MODELS) ──────────────────────────────────────
+
+def test_subset_deploy_filters_to_served_model_plus_shared(monkeypatch):
+    monkeypatch.setenv("WAN_STUDIO_MODELS", "wan2.1_t2v_1.3b")
+    paths = {v.mount_path for v in manifest.all_volumes()}
+    assert paths == {"/models/wan2.1-t2v-1.3b", "/models/wan-shared-encoders"}
+    # the 1.3B T2V needs neither preproc nor Lightning LoRAs
+    assert "/models/wan-preproc" not in paths
+    assert "/models/wan-lightning-loras" not in paths
+
+
+def test_subset_includes_preproc_and_lora_when_a_served_model_needs_them(monkeypatch):
+    monkeypatch.setenv("WAN_STUDIO_MODELS", "wan2.1_vace_14b,wan2.1_t2v_14b")
+    paths = {v.mount_path for v in manifest.all_volumes()}
+    assert "/models/wan-preproc" in paths           # VACE consumes wan-preproc
+    assert "/models/wan-lightning-loras" in paths   # t2v-14b has Lightning
+
+
+def test_full_deploy_when_env_unset(monkeypatch):
+    monkeypatch.delenv("WAN_STUDIO_MODELS", raising=False)
+    assert manifest.available_keys() is None
+    paths = {v.mount_path for v in manifest.all_volumes()}
+    assert {"/models/wan-shared-encoders", "/models/wan-preproc",
+            "/models/wan-lightning-loras"} <= paths
+
+
+def test_resolve_available_key_falls_back_to_served(monkeypatch):
+    monkeypatch.setenv("WAN_STUDIO_MODELS", "wan2.1_t2v_1.3b")
+    assert manifest.resolve_available_key("wan2.2_t2v_a14b", "t2v") == "wan2.1_t2v_1.3b"
+    assert manifest.resolve_available_key("wan2.1_t2v_14b", "t2v") == "wan2.1_t2v_1.3b"
+    assert manifest.resolve_available_key("wan2.1_t2v_1.3b", "t2v") == "wan2.1_t2v_1.3b"
+
+
+def test_resolve_available_key_full_deploy_unchanged(monkeypatch):
+    monkeypatch.delenv("WAN_STUDIO_MODELS", raising=False)
+    assert manifest.resolve_available_key("wan2.2_t2v_a14b", "t2v") == "wan2.2_t2v_a14b"

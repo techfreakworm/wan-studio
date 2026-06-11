@@ -125,8 +125,9 @@ def _stitch_default_model() -> None:
     try:
         from pipelines.handle import stitch_local_dir
         from pipelines.registry import BY_KEY
+        from provisioning.manifest import resolve_available_key
         import time as _t
-        key = "wan2.2_t2v_a14b"
+        key = resolve_available_key("wan2.2_t2v_a14b", "t2v")
         print(f"=== STITCH {key} ===", flush=True)
         t0 = _t.time()
         path = stitch_local_dir(BY_KEY[key])
@@ -149,8 +150,9 @@ def _preload_default_t2v_handle() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
     try:
+        from provisioning.manifest import resolve_available_key
         import time as _t
-        key = "wan2.2_t2v_a14b"
+        key = resolve_available_key("wan2.2_t2v_a14b", "t2v")
         print(f"=== PRELOAD T2V handle to CPU: {key} ===", flush=True)
         t0 = _t.time()
         # acquire() builds via _build_handle + ensure_loaded (disk → CPU RAM
@@ -191,7 +193,10 @@ def _key_for(mode: str, generation: str, resolution_label: str = "") -> str:
     local_override = os.getenv(f"WAN_STUDIO_{mode.upper()}_LOCAL_KEY")
     if local_override and os.getenv("SPACES_ZERO_GPU") is None:
         key = local_override
-    return key
+    # Subset deploy: if the ideal checkpoint isn't served by this Space, fall back
+    # to an available one for this mode (full deploy returns the key unchanged).
+    from provisioning.manifest import resolve_available_key
+    return resolve_available_key(key, mode)
 
 
 def _parse_resolution(label: str) -> tuple[int, int]:
