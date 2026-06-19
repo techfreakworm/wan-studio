@@ -80,10 +80,11 @@ def test_ui_dispatch_arg_order_aligns_for_v2v_flf2v_and_vace():
         "video.mp4", "wan2.1", "fast", "restyle prompt", 0.6,
         "neg", 1234, False, 0, 0.0, 0.0,
     )
-    generation, resolution, duration = app._ui_dispatch("v2v", v2v_args)
+    generation, resolution, duration, preset = app._ui_dispatch("v2v", v2v_args)
     assert generation == "wan2.1"
     assert resolution == ""
     assert duration == 3.0
+    assert preset == "fast"
 
     # FLF2V layout: (start_frame, generation, preset, end_uploaded,
     #                end_generated, prompt, *advanced).
@@ -91,10 +92,11 @@ def test_ui_dispatch_arg_order_aligns_for_v2v_flf2v_and_vace():
         "start.png", "wan2.1", "quality", None, None, "transition prompt",
         "neg", 1234, False, 0, 0.0, 0.0,
     )
-    generation, resolution, duration = app._ui_dispatch("flf2v", flf2v_args)
+    generation, resolution, duration, preset = app._ui_dispatch("flf2v", flf2v_args)
     assert generation == "wan2.1"
     assert resolution == ""
     assert duration == 5.0
+    assert preset == "quality"
 
     # VACE layout: (submode, generation, preset, source_video, references,
     #               prompt, *advanced).
@@ -102,10 +104,11 @@ def test_ui_dispatch_arg_order_aligns_for_v2v_flf2v_and_vace():
         "Depth", "wan2.1", "quality", "source.mp4", None, "vace prompt",
         "neg", 1234, False, 0, 0.0, 0.0,
     )
-    generation, resolution, duration = app._ui_dispatch("vace", vace_args)
+    generation, resolution, duration, preset = app._ui_dispatch("vace", vace_args)
     assert generation == "wan2.1"
     assert resolution == ""
     assert duration == 4.0
+    assert preset == "quality"
 
 
 def test_flf2v_generate_end_handler_exists():

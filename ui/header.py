@@ -37,11 +37,20 @@ def build_header() -> dict:
                 elem_id="ws-brand-html",
             )
 
-        # ── Generation dropdown ──────────────────────────────────────────
+        # ── Generation dropdown (served generations only) ────────────────
+        # No silent remapping: a generation with no served model is not a
+        # working selection, so the header can never claim "Wan 2.2" while a
+        # different checkpoint runs underneath. Unserved generations appear as a
+        # "(coming soon)" entry (visible roadmap); selecting one is reverted in
+        # app.py with a toast rather than silently downgraded.
+        from provisioning.manifest import served_generations
+        _GEN_LABEL = {"wan2.1": "Wan 2.1", "wan2.2": "Wan 2.2"}
+        _served_gens = served_generations() or ["wan2.1"]
+        _gen_choices = [(_GEN_LABEL[g], g) for g in _served_gens]
         with gr.Column(scale=0, min_width=150, elem_classes=["ws-chrome-col"]):
             generation = gr.Dropdown(
-                choices=[("Wan 2.2", "wan2.2"), ("Wan 2.1", "wan2.1")],
-                value="wan2.2",
+                choices=_gen_choices,
+                value=_served_gens[0],
                 label="Generation",
                 show_label=False,
                 interactive=True,

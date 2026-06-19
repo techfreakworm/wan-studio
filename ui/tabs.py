@@ -99,7 +99,7 @@ def build_t2v_tab() -> dict:
             enhance = gr.Button("✨ Enhance Prompt", variant="secondary", size="sm")
             with gr.Row():
                 resolution = gr.Dropdown(
-                    choices=RESOLUTION_PRESETS, value="1280x720 (16:9)", label="Resolution",
+                    choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
                 duration = gr.Slider(0.5, 5.1, value=3.4, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()
@@ -128,7 +128,7 @@ def build_i2v_tab() -> dict:
             )
             with gr.Row():
                 resolution = gr.Dropdown(
-                    choices=RESOLUTION_PRESETS, value="1280x720 (16:9)", label="Resolution",
+                    choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
                 duration = gr.Slider(0.5, 5.1, value=3.0, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()

@@ -8,6 +8,7 @@ diffusers>=0.38.0           # load_into_transformer_2 for Wan 2.2 MoE LoRA (PR #
 transformers>=4.45          # UMT5EncoderModel, CLIPVisionModel
 accelerate>=0.34
 peft>=0.13
+ftfy>=6.1                   # WanImageToVideoPipeline._clean_caption (prompt normalization)
 
 # HF infrastructure
 huggingface_hub>=1.0,<2.0   # v1.x API — note HfFolder removed

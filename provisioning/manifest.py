@@ -42,6 +42,29 @@ def _served_models() -> list:
     return [m for m in ALL_MODELS if avail is None or m.key in avail]
 
 
+def served_generations() -> list[str]:
+    """Generations ('wan2.1' / 'wan2.2') with at least one served model, in
+    display order. Drives the header dropdown so a user can't select a
+    generation this deployment doesn't actually serve (which used to silently
+    downgrade to a different checkpoint). No silent remapping — capability flows
+    from the served set."""
+    gens = {m.generation for m in _served_models()}
+    return [g for g in ("wan2.1", "wan2.2") if g in gens]
+
+
+def served_resolutions(mode: str) -> list[str]:
+    """Native resolutions served for a mode ('480p'/'720p'), smallest first.
+    The per-mode resolution dropdown is built from this and defaults to the
+    smallest (fastest) — so a user can't request a resolution the served
+    checkpoint can't do."""
+    order = ["480p", "720p", "1080p"]
+    res: set[str] = set()
+    for m in _served_models():
+        if m.mode == mode:
+            res.update(m.native_resolutions)
+    return [r for r in order if r in res]
+
+
 def resolve_available_key(preferred: str, mode: str) -> str:
     """Pick a registry key that is actually served by this deployment.
 

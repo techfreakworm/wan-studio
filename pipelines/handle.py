@@ -135,6 +135,18 @@ def _mount_path(card: ModelCard) -> str:
     """
     stitched = stitch_local_dir(card)
     if stitched:
+        # ZeroGPU: copy the stitched checkpoint (symlinks → real bytes) onto the
+        # local ephemeral disk ONCE, then load from there. The HF Volume mount
+        # is slow (~76s/shard); a safetensors mmap stays backed by the mount, so
+        # `pipe.to('cuda')` later page-faults all 28 GB from the mount and blows
+        # the GPU duration budget. Backing the weights with local NVMe makes the
+        # host→GPU copy fault from fast disk instead. See pipelines/trace.py.
+        if os.getenv("SPACES_ZERO_GPU") is not None and os.getenv("WAN_STUDIO_TIER2", "1") == "1":
+            try:
+                return tier2_warm_copy(_slug_for(card), stitched)
+            except Exception as e:  # never let the fast-path break loading
+                print(f"=== TIER2 copy failed for {_slug_for(card)} ({e}); using mount ===", flush=True)
+                return stitched
         return stitched
     if os.getenv("SPACES_ZERO_GPU") is not None:
         raise RuntimeError(
@@ -156,12 +168,15 @@ def tier2_warm_copy(slug: str, src_dir: str) -> str:
     workers) fast. Idempotent via a marker. Caller is responsible for
     LRU-evicting prior hot copies to stay under the 150 GB disk cap.
     """
+    import time as _t
     src = Path(src_dir)
     dst = TIER2_ROOT / slug
     marker = dst / ".wan_hot_done"
     if marker.exists():
         return str(dst)
     dst.mkdir(parents=True, exist_ok=True)
+    t0 = _t.time()
+    nbytes = 0
     for f in src.rglob("*"):
         if not f.is_file():
             continue
@@ -169,7 +184,15 @@ def tier2_warm_copy(slug: str, src_dir: str) -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             shutil.copy2(f, target)  # resolves symlinks → real local bytes
+            try:
+                nbytes += target.stat().st_size
+            except OSError:
+                pass
     marker.touch()
+    dt = max(0.001, _t.time() - t0)
+    gb = nbytes / 1e9
+    print(f"=== TIER2 warm-copy {slug}: {gb:.1f} GB mount→local in {dt:.0f}s "
+          f"({gb / dt * 1000:.0f} MB/s) → {dst} ===", flush=True)
     return str(dst)
 
 
@@ -200,6 +223,25 @@ def _lora_repo_for(card: ModelCard) -> str:
     return card.lightning_lora_repo
 
 
+def diffusers_step_callback(on_step, total_steps):
+    """Adapt a simple `on_step(done:int, total:int)` into a diffusers
+    `callback_on_step_end` so the Gradio progress bar advances per denoise step.
+
+    Returns None if no callback — the caller then omits the kwarg. Never lets a
+    progress-update error break generation."""
+    if on_step is None:
+        return None
+
+    def _cb(pipe, step, timestep, callback_kwargs):
+        try:
+            on_step(step + 1, total_steps)
+        except Exception:
+            pass
+        return callback_kwargs
+
+    return _cb
+
+
 class WanModelHandle:
     """Wraps a single (mode, generation, size) combo.
 
@@ -213,6 +255,7 @@ class WanModelHandle:
         self.lora_loaded: bool = False
         self.current_preset: Preset | None = None
         self.cuda_attached: bool = False  # set by ensure_cuda_attached (inside @spaces.GPU)
+        self.offload_enabled: bool = False  # accelerate model_cpu_offload hooks active
 
     @classmethod
     def for_key(cls, key: str) -> "WanModelHandle":
@@ -228,29 +271,63 @@ class WanModelHandle:
         worker exists). The CUDA dance happens lazily in ensure_cuda_attached.
         """
         if self.pipe is not None:
+            from pipelines.trace import trace
+            trace(f"ensure_loaded[{self.card.key}] CACHE-HIT (already built)")
             return
+        from pipelines.trace import trace
+        trace(f"ensure_loaded[{self.card.key}] BUILD start (disk→CPU)")
         self.pipe = self._build_pipeline()
+        trace(f"ensure_loaded[{self.card.key}] pipeline built")
         self._configure_scheduler()
         if self.card.lightning_available:
             self._load_lightning_lora()
             self.lora_loaded = True
+        trace(f"ensure_loaded[{self.card.key}] BUILD done (LoRA={self.lora_loaded})")
+
+    def _needs_offload(self) -> bool:
+        """Decide between model-cpu-offload (low peak VRAM, slower per-step from
+        component streaming) and plain resident `.to('cuda')` (fast, but the
+        whole pipe must fit the 48 GB slice + the fp32 activation spike).
+
+        - MoE (two 14B experts, ~56 GB) → always offload.
+        - I2V/FLF2V/Animate (`requires_image_encoder`): 28 GB transformer + ~13 GB
+          shared UMT5/CLIP ≈ 42 GB resident leaves no room for activations → OOM
+          (the NVML `CUDACachingAllocator` assert on the MIG slice) → offload.
+        - T2V/V2V single-14B: no CLIP image encoder, so ~28 GB transformer + ~11 GB
+          UMT5 ≈ 39 GB — fits resident at 480p with headroom for activations, and
+          resident is much faster (no per-step 28 GB stream), which is what makes
+          14B-T2V *Quality* (50 steps) fit the GPU window at all. Stays resident.
+
+        NOTE: at 720p the activation spike is larger; 14B-T2V there may still need
+        offload — handled by the per-call resolution gate, not this card-level
+        default."""
+        return self.card.is_moe or self.card.requires_image_encoder
 
     def ensure_cuda_attached(self) -> None:
         """Move the loaded pipeline to GPU. MUST be called from inside @spaces.GPU.
 
-        On MoE cards we use accelerate's model_cpu_offload hooks so the two
-        14B transformers fit on the 48 GB `large` slice. On single-transformer
-        cards we just `.to(device)`. Idempotent — re-entry from a warm worker
+        Large models (`_needs_offload`) use accelerate's model_cpu_offload hooks
+        so only the active component sits on the 48 GB `large` slice. Small ones
+        (1.3B / 5B) just `.to(device)`. Idempotent — re-entry from a warm worker
         is a no-op.
         """
+        from pipelines.trace import trace
         if self.cuda_attached:
+            trace(f"ensure_cuda_attached[{self.card.key}] already on GPU")
             return
         import torch
         backend = detect()
-        if self.card.is_moe and torch.cuda.is_available():
+        if self._needs_offload() and torch.cuda.is_available():
+            trace(f"ensure_cuda_attached[{self.card.key}] enable_model_cpu_offload start")
             self.pipe.enable_model_cpu_offload()
+            self.offload_enabled = True
+            trace(f"ensure_cuda_attached[{self.card.key}] offload hooks installed")
         else:
+            trace(f"ensure_cuda_attached[{self.card.key}] .to({backend.device}) start (host→GPU)")
             self.pipe.to(backend.device)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            trace(f"ensure_cuda_attached[{self.card.key}] on GPU")
         self.cuda_attached = True
 
     def configure_preset(self, preset: Preset) -> PresetKwargs:
@@ -275,15 +352,33 @@ class WanModelHandle:
         return kwargs
 
     def unload_to_cpu(self) -> None:
-        """Move transformers off GPU. Called when switching active mode."""
+        """Move transformers off GPU but keep them resident in CPU RAM.
+
+        Called when switching the GPU-active mode. The pipeline stays built and
+        LoRA-attached (warm in CPU) so re-acquiring this key is instant — only
+        the GPU residency moves. Resetting `cuda_attached` is essential: it lets
+        a later `ensure_cuda_attached()` re-move this same warm handle back onto
+        the GPU when the user swaps back (without it, the swap-back would skip
+        the `.to(device)` and try to run a CPU-resident pipe on CUDA inputs)."""
         if self.pipe is None:
             return
-        if hasattr(self.pipe, "transformer") and self.pipe.transformer is not None:
-            self.pipe.transformer.to("cpu")
-        if hasattr(self.pipe, "transformer_2") and self.pipe.transformer_2 is not None:
-            self.pipe.transformer_2.to("cpu")
+        if self.offload_enabled:
+            # Tear down the accelerate offload hooks (also from the shared
+            # encoders this pipe borrowed) so the next pipe gets clean modules
+            # and the components return to CPU. A re-acquire re-installs them.
+            try:
+                self.pipe.maybe_free_model_hooks()
+            except Exception:
+                pass
+            self.offload_enabled = False
+        else:
+            if hasattr(self.pipe, "transformer") and self.pipe.transformer is not None:
+                self.pipe.transformer.to("cpu")
+            if hasattr(self.pipe, "transformer_2") and self.pipe.transformer_2 is not None:
+                self.pipe.transformer_2.to("cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        self.cuda_attached = False
 
     # --- Mode-specific overrides (implemented in subclasses) ---
 
@@ -331,36 +426,90 @@ class WanModelHandle:
 
 
 class ModelRegistry:
-    """Holds at-most-one warmed handle. Switching keys evicts the prior one.
+    """At-most-one GPU-attached handle, up to `max_warm` handles kept warm in CPU.
+
+    Two distinct residencies, decoupled:
+      • GPU-attached — exactly one (`warm_key`). The 48 GB slice holds one
+        transformer family at a time; switching keys moves the prior one off
+        the GPU via `unload_to_cpu()` (GPU→CPU, frees VRAM) but leaves it built
+        and LoRA-attached.
+      • CPU-warm — up to `max_warm` handles stay resident in CPU RAM (LRU). A
+        re-acquire of any warm key is a cache hit, so it never re-pays the slow
+        disk→CPU shard load on the GPU clock. Only when the warm set exceeds
+        `max_warm` is the least-recently-used handle fully freed (pipe=None +
+        gc + tier-2 disk evict).
+
+    This is what makes the cross-call warm-swap work on ZeroGPU: the served
+    checkpoints are preloaded to CPU at startup (app.py), every fork inherits
+    them copy-on-write, and a T2V↔I2V swap only moves GPU residency — no cold
+    load lands inside a `@spaces.GPU` window.
 
     factory(key) -> WanModelHandle builds a fresh handle for a registry key
     (injected so tests can stub it; production passes the HANDLER_REGISTRY
     builder).
     """
 
-    def __init__(self, factory):
+    def __init__(self, factory, max_warm: int | None = None):
         self._factory = factory
         self._handles: dict[str, WanModelHandle] = {}
         self.warm_key: str | None = None
+        if max_warm is None:
+            max_warm = int(os.getenv("WAN_STUDIO_MAX_WARM", "2"))
+        self.max_warm = max(1, max_warm)
+        # MRU-ordered key list (most-recently-used last) for CPU-warm eviction.
+        self._lru: list[str] = []
+
+    def _touch(self, key: str) -> None:
+        if key in self._lru:
+            self._lru.remove(key)
+        self._lru.append(key)
+
+    def _evict_cpu_overflow(self) -> None:
+        """Free least-recently-used warm handles beyond `max_warm` (never the
+        GPU-attached `warm_key`)."""
+        while len(self._handles) > self.max_warm:
+            victim = next((k for k in self._lru if k != self.warm_key), None)
+            if victim is None:
+                break
+            handle = self._handles.pop(victim, None)
+            self._lru.remove(victim)
+            if handle is not None:
+                handle.unload_to_cpu()
+                handle.pipe = None
+            gc.collect()
+            # Drop tier-2 hot copies for every checkpoint no longer warm.
+            self._prune_tier2()
+
+    def _prune_tier2(self) -> None:
+        # Always keep the shared-encoders hot copy — it's injected into every
+        # pipe, not owned by any single model handle.
+        keep = {_slug_for(h.card) for h in self._handles.values()} | {"wan-shared-encoders"}
+        if not TIER2_ROOT.exists():
+            return
+        for child in TIER2_ROOT.iterdir():
+            if child.is_dir() and child.name not in keep:
+                shutil.rmtree(child, ignore_errors=True)
 
     def acquire(self, key: str) -> WanModelHandle:
+        from pipelines.trace import trace
         if key not in BY_KEY:
             raise KeyError(f"Unknown model key: {key!r}")
+        trace(f"acquire[{key}] warm_key={self.warm_key} warm_set={list(self._handles)}")
         if self.warm_key == key and key in self._handles:
+            self._touch(key)
+            trace(f"acquire[{key}] FULL WARM HIT (on-GPU resident)")
             return self._handles[key]
+        # Switching GPU residency: move the prior attached handle off the GPU,
+        # but keep it warm in CPU (instant swap-back). It is freed only later if
+        # it falls out of the LRU window.
         if self.warm_key is not None and self.warm_key != key:
             prev = self._handles.get(self.warm_key)
             if prev is not None:
                 prev.unload_to_cpu()
-                tier2_evict(_slug_for(prev.card))
-                # Reclaim CPU RAM: drop the handle entry AND the pipe reference,
-                # then collect. Otherwise every evicted transformer family stays
-                # resident in RAM forever (spec §6.2: ≤1 warm family resident).
-                self._handles.pop(self.warm_key, None)
-                prev.pipe = None
-                gc.collect()
         handle = self._handles.get(key) or self._factory(key)
         handle.ensure_loaded()
         self._handles[key] = handle
         self.warm_key = key
+        self._touch(key)
+        self._evict_cpu_overflow()
         return handle

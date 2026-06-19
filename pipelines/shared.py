@@ -37,8 +37,18 @@ def _shared_path() -> str:
     if SHARED_MOUNT.exists():
         # Stitch: small configs fetched from the repo (the mount truncates
         # sub-1KB JSON like vae/config.json), weights symlinked from the mount.
-        from pipelines.handle import stitch_shared_dir
-        return stitch_shared_dir() or str(SHARED_MOUNT)
+        from pipelines.handle import stitch_shared_dir, tier2_warm_copy
+        stitched = stitch_shared_dir() or str(SHARED_MOUNT)
+        # ZeroGPU: back the shared encoders (UMT5-XXL ~11 GB injected into every
+        # pipe) with local NVMe too — otherwise pipe.to('cuda') page-faults them
+        # from the slow mount on the GPU clock. See pipelines/handle._mount_path.
+        if os.getenv("SPACES_ZERO_GPU") is not None and os.getenv("WAN_STUDIO_TIER2", "1") == "1":
+            try:
+                return tier2_warm_copy("wan-shared-encoders", stitched)
+            except Exception as e:
+                print(f"=== TIER2 copy failed for shared-encoders ({e}); using mount ===", flush=True)
+                return stitched
+        return stitched
     if os.getenv("SPACES_ZERO_GPU") is not None:
         raise RuntimeError(
             f"wan-shared-encoders mount missing at {SHARED_MOUNT} — check create_space.py manifest"

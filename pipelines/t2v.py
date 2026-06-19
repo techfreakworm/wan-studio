@@ -63,10 +63,13 @@ class T2VHandle(WanModelHandle):
         num_frames: int = 81,
         seed: int = 42,
         preset_kwargs: dict[str, Any],
+        step_callback=None,
     ) -> list:
         """Return list of numpy frames. Caller exports via export_to_video."""
+        from pipelines.handle import diffusers_step_callback
         self.ensure_loaded()
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
+        cb = diffusers_step_callback(step_callback, preset_kwargs.get("num_inference_steps"))
         out = self.pipe(
             prompt=prompt,
             negative_prompt=negative_prompt or None,
@@ -74,6 +77,7 @@ class T2VHandle(WanModelHandle):
             width=width,
             num_frames=num_frames,
             generator=gen,
+            **({"callback_on_step_end": cb} if cb else {}),
             **preset_kwargs,
         )
         return out.frames[0]

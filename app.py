@@ -141,24 +141,38 @@ def _stitch_default_model() -> None:
         traceback.print_exc()
 
 
-# ── Preload the default T2V handle into CPU RAM at app startup ─────────
-# Worker forks inherit this via copy-on-write so each @spaces.GPU click
-# skips the ~120s of disk-to-RAM shard load that was blowing the GPU
-# duration budget. Reads from the stitched dir built above — instant,
-# no network, no disk pressure.
-def _preload_default_t2v_handle() -> None:
+# ── Preload the served handles into CPU RAM at app startup ─────────────
+# Worker forks inherit these via copy-on-write so each @spaces.GPU click
+# skips the slow disk→CPU shard load that was blowing the GPU duration
+# budget (a cold 14B load takes >90s — past the I2V reservation, so the
+# first click was aborting). The registry keeps up to `max_warm` handles
+# resident, so a T2V↔I2V swap only moves GPU residency: no cold load ever
+# lands inside a @spaces.GPU window. Bounded at REGISTRY.max_warm so a
+# larger served set never blows CPU RAM at boot.
+def _preload_served_handles() -> None:
     if os.getenv("SPACES_ZERO_GPU") is None:
         return
     try:
-        from provisioning.manifest import resolve_available_key
+        from provisioning.manifest import available_keys, resolve_available_key
         import time as _t
-        key = resolve_available_key("wan2.2_t2v_a14b", "t2v")
-        print(f"=== PRELOAD T2V handle to CPU: {key} ===", flush=True)
-        t0 = _t.time()
-        # acquire() builds via _build_handle + ensure_loaded (disk → CPU RAM
-        # only; no CUDA touch) and warms it in the single ModelRegistry LRU.
-        REGISTRY.acquire(key)
-        print(f"=== PRELOAD done in {int(_t.time()-t0)}s — handle cached ===", flush=True)
+        # Default T2V first (the mode the UI opens on → initial GPU resident),
+        # then the rest of the served set, capped at the warm budget.
+        default_t2v = resolve_available_key("wan2.2_t2v_a14b", "t2v")
+        served = available_keys() or {default_t2v}  # None ⇒ full deploy: warm the default
+        ordered = [default_t2v] + sorted(k for k in served if k != default_t2v)
+        ordered = ordered[: REGISTRY.max_warm]
+        for key in ordered:
+            print(f"=== PRELOAD handle to CPU: {key} ===", flush=True)
+            t0 = _t.time()
+            # acquire() builds via _build_handle + ensure_loaded (disk → CPU RAM
+            # only; no CUDA touch) and keeps it warm in the bounded registry.
+            REGISTRY.acquire(key)
+            print(f"=== PRELOAD {key} done in {int(_t.time()-t0)}s ===", flush=True)
+        # Leave the default T2V as the nominal GPU-resident key so the first
+        # T2V click is a pure cache hit (the UI opens on T2V).
+        if default_t2v in REGISTRY._handles:
+            REGISTRY.warm_key = default_t2v
+        print(f"=== PRELOAD complete — warm: {list(REGISTRY._handles.keys())} ===", flush=True)
     except Exception as e:
         import traceback
         print(f"=== PRELOAD FAILED: {type(e).__name__}: {e} ===", flush=True)
@@ -167,7 +181,7 @@ def _preload_default_t2v_handle() -> None:
 
 _probe_filesystem()
 _stitch_default_model()
-_preload_default_t2v_handle()
+_preload_served_handles()
 
 
 
@@ -223,10 +237,23 @@ def _get_duration(mode, *ui_args, **kwargs):
     registry key from the slots that carry (generation, resolution, duration_s)
     by mode before scaling.
     """
-    from utils.budget import duration_for
-    generation, resolution_label, duration_s = _ui_dispatch(mode, ui_args)
+    from utils.budget import reserve_seconds
+    generation, resolution_label, duration_s, preset_label = _ui_dispatch(mode, ui_args)
     key = _key_for(mode, generation, resolution_label)
-    return duration_for(key, duration_s=float(duration_s or 3.0))
+    steps = _effective_steps(key, preset_label, ui_args)
+    return reserve_seconds(key, steps=steps, resolution_label=resolution_label,
+                           duration_s=float(duration_s or 3.0))
+
+
+def _effective_steps(key: str, preset_label, ui_args: tuple) -> int:
+    """Resolved denoise-step count: the Advanced override (last-3 slot for every
+    wired mode) if set, else the preset's steps for this card."""
+    steps_override = ui_args[-3] if len(ui_args) >= 3 else 0
+    if steps_override and int(steps_override) > 0:
+        return int(steps_override)
+    from pipelines.preset import resolve
+    from pipelines.registry import BY_KEY
+    return resolve(BY_KEY[key], _coerce_preset(preset_label)).num_inference_steps
 
 
 def _coerce_preset(preset_label: str) -> str:
@@ -259,28 +286,28 @@ def _raise_user_error(e: BaseException) -> None:
 #   i2v: (image, prompt, generation, preset, resolution, duration, *advanced)
 # `_inputs_for` (in build) builds these lists; `_ui_dispatch` reads back the
 # (generation, resolution, duration_s) needed for key + duration resolution.
-def _ui_dispatch(mode: str, ui_args: tuple) -> tuple[str, str, float]:
-    """Extract (generation, resolution_label, duration_s) from a mode's raw
-    UI arg tuple. Lets the shared duration callable + key resolver work for
-    both the image-led (i2v) and prompt-led (t2v) layouts."""
+def _ui_dispatch(mode: str, ui_args: tuple) -> tuple[str, str, float, str]:
+    """Extract (generation, resolution_label, duration_s, preset_label) from a
+    mode's raw UI arg tuple. Lets the shared duration callable + key resolver +
+    ETA work for both the image-led (i2v) and prompt-led (t2v) layouts."""
     if mode == "i2v":
         # (image, prompt, generation, preset, resolution, duration, ...)
-        return ui_args[2], ui_args[4], ui_args[5]
+        return ui_args[2], ui_args[4], ui_args[5], ui_args[3]
     if mode == "v2v":
         # (video, generation, preset, prompt, strength, ...) — no resolution
         # dropdown; fixed ~3s reserve so _get_duration scales sanely.
-        return ui_args[1], "", 3.0
+        return ui_args[1], "", 3.0, ui_args[2]
     if mode == "flf2v":
         # (start_frame, generation, preset, end_uploaded, end_generated, ...) —
         # no resolution dropdown; FLF2V is an 81-frame (~5s) fixed clip.
-        return ui_args[1], "", 5.0
+        return ui_args[1], "", 5.0, ui_args[2]
     if mode == "vace":
         # (submode, generation, preset, source_video, references, prompt, ...) —
         # no resolution dropdown; default ~4s reserve (length comes from the
         # source video at runtime, falling back to 81 frames).
-        return ui_args[1], "", 4.0
+        return ui_args[1], "", 4.0, ui_args[2]
     # t2v: (prompt, generation, preset, resolution, duration, ...)
-    return ui_args[1], ui_args[3], ui_args[4]
+    return ui_args[1], ui_args[3], ui_args[4], ui_args[2]
 
 
 def _build_inference_kwargs(preset_kwargs, steps_override, cfg_override, cfg_2_override):
@@ -301,6 +328,32 @@ def _build_inference_kwargs(preset_kwargs, steps_override, cfg_override, cfg_2_o
             else preset_kwargs.guidance_scale_2
         )
     return inference_kwargs
+
+
+def _assert_fits(key: str, steps, resolution_label: str, duration_s) -> None:
+    """Fail fast if this (model, res, steps, length) can't finish inside the
+    ZeroGPU window — so the user gets an immediate, actionable error instead of
+    watching a progress bar for minutes only to abort near the end (product-brain
+    D5: never wait then abort)."""
+    from utils.budget import fits_window, ZEROGPU_DURATION_CAP
+    if not fits_window(key, steps=int(steps), resolution_label=resolution_label,
+                       duration_s=float(duration_s or 3.0)):
+        raise gr.Error(
+            f"This setting ({resolution_label or 'this length'}, {int(steps)} steps) needs "
+            f"more than the {ZEROGPU_DURATION_CAP}s GPU limit. Lower the resolution or steps, "
+            f"or switch to Fast."
+        )
+
+
+def _make_step_progress(progress, lo: float = 0.2, hi: float = 0.92):
+    """Build an `on_step(done, total)` that advances the Gradio progress bar per
+    denoise step. Passed to handle.generate → diffusers callback_on_step_end, so
+    the UI shows live progress instead of a frozen panel (track_tqdm stays off to
+    avoid the SSE DOM-accumulation bug)."""
+    def on_step(done: int, total: int) -> None:
+        frac = lo + (hi - lo) * (done / max(1, int(total or 1)))
+        progress(min(hi, frac), desc=f"Denoising · step {done}/{total}")
+    return on_step
 
 
 def _export(frames, mode: str, fallback_message: str = "") -> str:
@@ -351,12 +404,14 @@ def _run_t2v(spec, ui_args, progress):
         seed = random.randint(0, 2**31 - 1)
 
     preset = _coerce_preset(preset_label)
-    handle = REGISTRY.acquire(_key_for(spec.mode, generation, resolution_label))
-    progress(0.05, desc="Configuring preset…")
+    key = _key_for(spec.mode, generation, resolution_label)
+    handle = REGISTRY.acquire(key)
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
     preset_kwargs = handle.configure_preset(preset)
     inference_kwargs = _build_inference_kwargs(
         preset_kwargs, steps_override, cfg_override, cfg_2_override
     )
+    _assert_fits(key, inference_kwargs["num_inference_steps"], resolution_label, duration_s)
 
     height, width = _parse_resolution(resolution_label)
     # Wan VAE temporal patching: num_frames must be 4k+1.
@@ -371,9 +426,10 @@ def _run_t2v(spec, ui_args, progress):
         num_frames=num_frames,
         seed=int(seed),
         preset_kwargs=inference_kwargs,
+        step_callback=_make_step_progress(progress),
     )
 
-    progress(0.9, desc="Encoding MP4…")
+    progress(0.95, desc="Encoding MP4…")
     return _export(frames, "t2v", preset_kwargs.fallback_message)
 
 
@@ -382,6 +438,10 @@ def _run_i2v(spec, ui_args, progress):
     coerces filepath → PIL.Image. Behaviour-identical to `generate_i2v`."""
     import random
     from PIL import Image
+    from pipelines.trace import trace, reset_trace
+
+    reset_trace()
+    trace("=== _run_i2v ENTER (GPU worker) ===")
 
     (image, prompt, generation, preset_label, resolution_label, duration_s,
      negative_prompt, seed, randomize, steps_override, cfg_override,
@@ -403,12 +463,16 @@ def _run_i2v(spec, ui_args, progress):
         seed = random.randint(0, 2**31 - 1)
 
     preset = _coerce_preset(preset_label)
-    handle = REGISTRY.acquire(_key_for(spec.mode, generation, resolution_label))
-    progress(0.05, desc="Configuring preset…")
+    key = _key_for(spec.mode, generation, resolution_label)
+    handle = REGISTRY.acquire(key)
+    trace("after REGISTRY.acquire")
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
     preset_kwargs = handle.configure_preset(preset)
+    trace("after configure_preset (preset + cuda attach done)")
     inference_kwargs = _build_inference_kwargs(
         preset_kwargs, steps_override, cfg_override, cfg_2_override
     )
+    _assert_fits(key, inference_kwargs["num_inference_steps"], resolution_label, duration_s)
 
     # max_area drives `aspect_ratio_resize` — clamp to the picked res.
     h_label, w_label = _parse_resolution(resolution_label)
@@ -416,6 +480,7 @@ def _run_i2v(spec, ui_args, progress):
     num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
 
     progress(0.2, desc="Generating frames…")
+    trace(f"generate START (num_frames={num_frames}, steps={inference_kwargs.get('num_inference_steps')})")
     frames = handle.generate(
         image=image,
         prompt=prompt,
@@ -424,9 +489,11 @@ def _run_i2v(spec, ui_args, progress):
         num_frames=num_frames,
         seed=int(seed),
         preset_kwargs=inference_kwargs,
+        step_callback=_make_step_progress(progress),
     )
+    trace("generate DONE")
 
-    progress(0.9, desc="Encoding MP4…")
+    progress(0.95, desc="Encoding MP4…")
     return _export(frames, "i2v", preset_kwargs.fallback_message)
 
 
@@ -448,7 +515,7 @@ def _run_v2v(spec, ui_args, progress):
         seed = random.randint(0, 2**31 - 1)
 
     handle = REGISTRY.acquire(_key_for(spec.mode, generation))
-    progress(0.05, desc="Configuring preset…")
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
     pk = handle.configure_preset(_coerce_preset(preset_label))
     inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
 
@@ -494,7 +561,7 @@ def _run_flf2v(spec, ui_args, progress):
         seed = random.randint(0, 2**31 - 1)
 
     handle = REGISTRY.acquire(_key_for(spec.mode, generation))
-    progress(0.05, desc="Configuring preset…")
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
     pk = handle.configure_preset(_coerce_preset(preset_label))
     # Let the card drive CFG per preset (quality_guidance=5.5 / lightning_guidance=1.0)
     # exactly like t2v/i2v — no hardcode, so the Fast/Lightning path isn't forced
@@ -563,7 +630,7 @@ def _run_vace(spec, ui_args, progress):
         seed = random.randint(0, 2**31 - 1)
 
     handle = REGISTRY.acquire(_key_for(spec.mode, generation))
-    progress(0.05, desc="Configuring preset…")
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
     pk = handle.configure_preset(_coerce_preset(preset_label))
 
     refs = gallery_to_references(references)
@@ -835,11 +902,14 @@ body, gradio-app, .gradio-container {
   box-shadow: none !important;
 }
 
-/* Suppress Gradio's status-tracker overlay (demo mode — no real generation). */
-#ws-content [data-testid="status-tracker"],
+/* Status-tracker overlay: KEPT VISIBLE — it renders the live per-step progress
+   bar (driven by handle.generate's callback_on_step_end → gr.Progress). The
+   demo-mode suppression that used to hide it was the real cause of the "no
+   progress bar" report. Only soften its chrome to match the Linear theme. */
 #ws-content .wrap.generating,
 #ws-content .wrap.full.generating {
-  display: none !important;
+  background: rgba(10, 12, 16, 0.72) !important;
+  backdrop-filter: blur(2px);
 }
 
 /* Hide Gradio's footer noise. */
@@ -2174,6 +2244,22 @@ def build() -> gr.Blocks:
         # Bind the client-side nav handler once the DOM is up.
         demo.load(fn=None, inputs=None, outputs=None, js=_NAV_JS)
 
+        # ── Hidden debug endpoint: read back the worker phase trace ──────────
+        # The @spaces.GPU worker's stdout is invisible in run logs and it is
+        # SIGKILLed on duration overrun, so we trace generation phases to a
+        # /tmp file (pipelines/trace.py) and surface them through this non-GPU
+        # endpoint (`/_debug_trace`) for latency diagnosis.
+        with gr.Row(visible=False):
+            _dbg_out = gr.Textbox(label="worker trace")
+            _dbg_btn = gr.Button("read trace")
+
+            def _debug_trace() -> str:
+                from pipelines.trace import read_trace
+                return read_trace(tail=300)
+
+            _dbg_btn.click(fn=_debug_trace, inputs=None, outputs=[_dbg_out],
+                           api_name="_debug_trace")
+
     return demo
 
 
@@ -2183,10 +2269,16 @@ def main():
     # Locally we use 7863 so we don't clash with other Gradio dev servers.
     default_port = "7860" if os.environ.get("SPACE_ID") else "7863"
     port = int(os.environ.get("WAN_STUDIO_PORT", default_port))
+    # ssr_mode=False: Gradio 6's experimental SSR drops the prediction event
+    # stream for long @spaces.GPU tasks behind the ZeroGPU queue — the browser
+    # shows "Error" within seconds even though the GPU task completes and the
+    # API (gradio_client) returns the video fine. Disabling SSR routes results
+    # through the reliable client-side path so generated videos actually render.
     demo.queue(max_size=20, default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=port,
         show_error=True,
+        ssr_mode=False,
     )
 
 

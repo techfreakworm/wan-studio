@@ -76,10 +76,13 @@ class I2VHandle(WanModelHandle):
         num_frames: int = 81,
         seed: int = 42,
         preset_kwargs: dict[str, Any],
+        step_callback=None,
     ) -> list:
+        from pipelines.handle import diffusers_step_callback
         self.ensure_loaded()
         resized, h, w = aspect_ratio_resize(image, self.pipe, max_area)
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
+        cb = diffusers_step_callback(step_callback, preset_kwargs.get("num_inference_steps"))
         out = self.pipe(
             image=resized,
             prompt=prompt,
@@ -88,6 +91,7 @@ class I2VHandle(WanModelHandle):
             width=w,
             num_frames=num_frames,
             generator=gen,
+            **({"callback_on_step_end": cb} if cb else {}),
             **preset_kwargs,
         )
         return out.frames[0]
