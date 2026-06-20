@@ -7,6 +7,34 @@ from __future__ import annotations
 from PIL import Image
 
 
+def save_video(frames, path, fps: int = 16) -> str:
+    """Encode frames → mp4 via imageio(+imageio-ffmpeg), libx264/yuv420p.
+
+    IMPORTANT: diffusers' `export_to_video` CORRUPTS clean uint8 RGB frames on this
+    MPS stack (diffusers 0.38) — the decoded mp4 comes out as colour-shifted confetti
+    even though the source frames are perfect (verified by dumping raw frames). imageio
+    encodes them cleanly. Always use this, never export_to_video.
+
+    `frames`: list of HxWx3 uint8/float RGB ndarrays or PIL.Images.
+    """
+    import numpy as np
+    import imageio.v2 as imageio
+    out = []
+    for f in frames:
+        a = np.asarray(f.convert("RGB")) if hasattr(f, "convert") else np.asarray(f)
+        if a.dtype != np.uint8:
+            scale = 255.0 if float(np.nanmax(a)) <= 1.0 + 1e-3 else 1.0
+            a = np.clip(np.nan_to_num(a) * scale, 0, 255).astype(np.uint8)
+        if a.ndim == 2:
+            a = np.stack([a, a, a], axis=-1)
+        if a.shape[-1] == 4:
+            a = a[..., :3]
+        out.append(np.ascontiguousarray(a))
+    imageio.mimsave(str(path), out, fps=fps, codec="libx264",
+                    output_params=["-pix_fmt", "yuv420p"])
+    return str(path)
+
+
 def center_crop_resize(image: Image.Image, h: int, w: int) -> Image.Image:
     """Resize `image` to COVER (w, h) preserving aspect ratio, then center-crop to (w, h).
 

@@ -47,7 +47,7 @@ def resolve(card: ModelCard, requested: Preset) -> PresetKwargs:
             num_inference_steps=card.lightning_steps,
             guidance_scale=card.lightning_guidance,
             guidance_scale_2=card.lightning_guidance if card.is_moe else None,
-            flow_shift=card.flow_shift,
+            flow_shift=card.lightning_flow_shift,  # Lightning's distilled shift, NOT quality's
             lora_active=True,
             effective_preset="fast",
             fallback_message=None,

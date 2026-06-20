@@ -28,6 +28,13 @@ from utils.backend import detect
 # Locally (MPS dev), fall back to standard HF cache.
 SPACE_MOUNT_ROOT = Path(os.getenv("WAN_STUDIO_MOUNT_ROOT", "/models"))
 
+# Local-converted bf16 checkpoints live here (outside the HF cache so the
+# "evict non-Wan cache" disk step can never touch them). One subdir per slug,
+# e.g. ~/wan-bf16/wan2.1-vace-14b/{transformer,scheduler,...}. Option-1 of the
+# push ruling: convert locally, load locally, defer the HF push.
+LOCAL_BF16_ROOT = Path(os.getenv("WAN_STUDIO_LOCAL_BF16_ROOT",
+                                 str(Path.home() / "wan-bf16")))
+
 # Bundled metadata (configs, tokenizer, .safetensors.index.json) shipped with
 # the Space repo itself. Working around an HF Volume bug where small JSON
 # files mount truncated — transformer/config.json shows 290B instead of 495B.
@@ -129,10 +136,18 @@ def _mount_path(card: ModelCard) -> str:
     """Resolve where the checkpoint lives for from_pretrained().
 
     Priority:
+      0. Local-converted bf16 dir (LOCAL_BF16_ROOT/<slug>) — the Option-1 path:
+         weights converted locally, OUTSIDE the HF cache (eviction-safe), never
+         pushed. Preferred locally so missing-mirror modes work with no push and
+         a local save_pretrained writes complete configs (no stitch hack needed).
       1. Stitched local dir (mount + bundled metadata) — zero disk on ZeroGPU.
       2. ZeroGPU + no mount → RAISE (never silently download fp32 into /tmp).
       3. Local + no mount → the bf16 mirror repo (downloads once to persistent cache).
     """
+    if os.getenv("SPACES_ZERO_GPU") is None:
+        local = LOCAL_BF16_ROOT / _slug_for(card)
+        if (local / "transformer").is_dir() or (local / "model_index.json").exists():
+            return str(local)
     stitched = stitch_local_dir(card)
     if stitched:
         # ZeroGPU: copy the stitched checkpoint (symlinks → real bytes) onto the
@@ -214,11 +229,18 @@ def _lora_repo_for(card: ModelCard) -> str:
     """Resolve where to load Lightning LoRA weights from.
 
     On ZeroGPU: read from the mounted /models/wan-lightning-loras consolidated mirror.
-    Locally: fall back to whatever `card.lightning_lora_repo` points at upstream.
+    Locally: the consolidated HF mirror repo holds the canonical Lightning weights
+    in a subdir-per-model layout (weight_name = "<slug>/lightning*.safetensors").
+    Use it whenever the card's weight path is one of those consolidated subpaths;
+    otherwise fall back to the card's upstream repo (e.g. FLF2V reuses a Kijai file
+    that isn't in the consolidated mirror).
     """
     backend = detect()
     if backend.is_zerogpu and LIGHTNING_MIRROR_MOUNT.exists():
         return str(LIGHTNING_MIRROR_MOUNT)
+    slug = _slug_for(card)
+    if (card.lightning_high_lora or "").startswith(slug + "/"):
+        return LIGHTNING_MIRROR_REPO
     assert card.lightning_lora_repo, f"{card.key} missing lightning_lora_repo upstream fallback"
     return card.lightning_lora_repo
 
@@ -336,11 +358,22 @@ class WanModelHandle:
         self.ensure_cuda_attached()
         kwargs = resolve(self.card, preset)
 
+        # Key the scheduler shift to the ACTIVE preset (Fast/Lightning runs at its
+        # distilled shift ≈5, Quality at the card's shift). ensure_loaded() set a
+        # default; this refines it now that the preset is known.
+        self._configure_scheduler(shift=kwargs.flow_shift)
+
         if not self.lora_loaded:
             self.current_preset = kwargs.effective_preset
             return kwargs
 
         if kwargs.effective_preset == "fast":
+            # MUST enable_lora() BEFORE set_adapters(): if a prior Quality run called
+            # disable_lora(), set_adapters() alone does NOT re-enable the turned-off
+            # layers — the Lightning LoRA silently has ZERO effect, and a 4-step/cfg1.0
+            # run with a dead distillation LoRA decodes to under-denoised garbage (reads
+            # as "Lightning broken"). enable_lora() is a no-op on first/fresh load.
+            self.pipe.enable_lora()
             if self.card.is_moe:
                 self.pipe.set_adapters(["lightning_high", "lightning_low"], [1.0, 1.0])
             else:
@@ -385,12 +418,24 @@ class WanModelHandle:
     def _build_pipeline(self) -> Any:
         raise NotImplementedError("Subclass must implement _build_pipeline()")
 
-    def _configure_scheduler(self) -> None:
-        """Set UniPCMultistepScheduler with the mode's flow_shift. Override if needed."""
-        from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-        self.pipe.scheduler = UniPCMultistepScheduler.from_config(
+    def _configure_scheduler(self, shift: float | None = None) -> None:
+        """Set FlowMatchEulerDiscreteScheduler with the given shift (defaults to the
+        card's QUALITY flow_shift). configure_preset() re-calls this with the ACTIVE
+        preset's shift so Fast/Lightning runs at its distilled shift, not quality's.
+
+        ROOT CAUSE (MPS oversaturation/neon, this whole campaign): diffusers'
+        UniPCMultistepScheduler — its multistep CORRECTOR diverges on MPS (it integrates
+        the history of DiT forward outputs with higher-order coefficients; the forward
+        itself is MPS==CPU clean). Swapping to a plain Euler flow-match integrator (the
+        diffusers equivalent of ComfyUI's euler + ModelSamplingDiscreteFlow, which is
+        clean) fixes it. Decisive A/B: same 1.3B / @21 / g5 that neoned all session →
+        clean photoreal, per-frame sat ~0.52 flat (vs UniPC ~0.85). flow_shift maps to
+        FlowMatchEuler's `shift` (same time_snr_shift formula).
+        """
+        from diffusers import FlowMatchEulerDiscreteScheduler
+        self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
             self.pipe.scheduler.config,
-            flow_shift=self.card.flow_shift,
+            shift=self.card.flow_shift if shift is None else shift,
         )
 
     def _load_lightning_lora(self) -> None:

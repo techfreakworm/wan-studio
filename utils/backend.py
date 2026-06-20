@@ -57,10 +57,28 @@ def detect() -> Backend:
         )
 
     if torch.backends.mps.is_available():
+        # Wan transformers + the lightx2v Lightning LoRAs are bf16-native; running
+        # them in fp16 risks range overflow → NaN → black frames. torch 2.11 MPS
+        # bf16 is mature, so we default to bf16 and keep an env escape hatch
+        # (WAN_STUDIO_MPS_DTYPE=float16) for A/B testing per model.
+        _dtype_map = {
+            "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+            "float16": torch.float16, "fp16": torch.float16,
+            "float32": torch.float32, "fp32": torch.float32,
+        }
+        _mps_dtype = _dtype_map.get(os.getenv("WAN_STUDIO_MPS_DTYPE", "bfloat16").lower(),
+                                    torch.bfloat16)
+        # VAE decode is the MEMORY DRIVER at length. Default bf16: measured to cut the 14B
+        # @17f peak 131.9GB→92.4GB (−40GB, off the 137GB ceiling) with PIXEL-IDENTICAL output
+        # (sharpness 1203→1209, sat/brightness unchanged, no_nan) — bf16 keeps fp32's exponent
+        # range so NO overflow (that's fp16's failure mode), only minor precision. Escape hatch
+        # WAN_STUDIO_VAE_DTYPE=float32 if any content/mode shows banding (gate on no_nan check).
+        _vae_dtype = _dtype_map.get(os.getenv("WAN_STUDIO_VAE_DTYPE", "bfloat16").lower(),
+                                    torch.bfloat16)
         return Backend(
             device="mps",
-            dtype=torch.float16,       # MPS bf16 still patchy as of mid-2026
-            vae_dtype=torch.float32,
+            dtype=_mps_dtype,
+            vae_dtype=_vae_dtype,
             is_zerogpu=False,
             zerogpu_size=None,
             supports_quant=False,      # FP8 crashes Metal

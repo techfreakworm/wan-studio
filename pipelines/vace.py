@@ -51,10 +51,12 @@ class VACEHandle(WanModelHandle):
         self.ensure_loaded()
         # WanVACEPipeline.__call__ has no flow_shift kwarg → reconfigure the
         # scheduler per request (3.0 at 480p, 5.0 at 720p; risk R24).
-        from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-        self.pipe.scheduler = UniPCMultistepScheduler.from_config(
+        # FlowMatchEuler (NOT UniPC) — UniPC's corrector neons on MPS; see
+        # handle._configure_scheduler for the full root-cause note. shift == flow_shift.
+        from diffusers import FlowMatchEulerDiscreteScheduler
+        self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
             self.pipe.scheduler.config,
-            flow_shift=flow_shift_for(self.card.key, height=height),
+            shift=flow_shift_for(self.card.key, height=height),
         )
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
         out = self.pipe(

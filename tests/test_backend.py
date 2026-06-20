@@ -13,18 +13,47 @@ def test_detect_device_is_one_of_known():
     assert backend.device in ("cuda", "mps", "cpu")
 
 
-def test_detect_vae_dtype_is_always_float32():
-    """VAE must stay fp32 on every backend per RESEARCH §7.2."""
-    backend = detect()
-    assert backend.vae_dtype == torch.float32
-
-
-def test_detect_mps_uses_float16_transformer():
+def test_detect_mps_vae_defaults_to_bfloat16(monkeypatch):
+    """MPS VAE defaults to bf16: measured to cut the 14B @17f peak 131.9→92.4GB
+    (off the 137GB ceiling) with pixel-identical output (no NaN/banding). bf16
+    keeps fp32's exponent range so no overflow. Verified empirically 2026-06."""
+    monkeypatch.delenv("WAN_STUDIO_VAE_DTYPE", raising=False)
     backend = detect()
     if backend.device == "mps":
-        assert backend.dtype == torch.float16, (
-            "MPS bf16 is patchy as of mid-2026; transformer must be fp16"
-        )
+        assert backend.vae_dtype == torch.bfloat16
+
+
+def test_detect_mps_vae_dtype_env_override(monkeypatch):
+    """WAN_STUDIO_VAE_DTYPE escape hatch back to fp32 if any content bands."""
+    monkeypatch.setenv("WAN_STUDIO_VAE_DTYPE", "float32")
+    backend = detect()
+    if backend.device == "mps":
+        assert backend.vae_dtype == torch.float32
+
+
+def test_detect_cuda_vae_stays_float32():
+    """CUDA/ZeroGPU keeps fp32 VAE (ample VRAM; numerical safety)."""
+    backend = detect()
+    if backend.device == "cuda":
+        assert backend.vae_dtype == torch.float32
+
+
+def test_detect_mps_defaults_to_bfloat16(monkeypatch):
+    """MPS defaults to bf16 — Wan transformers + lightx2v LoRAs are bf16-native
+    and torch 2.11 MPS bf16 is validated clean (no NaN/black frames). fp16's
+    narrow range risks overflow on these models. Verified empirically 2026-06."""
+    monkeypatch.delenv("WAN_STUDIO_MPS_DTYPE", raising=False)
+    backend = detect()
+    if backend.device == "mps":
+        assert backend.dtype == torch.bfloat16
+
+
+def test_detect_mps_dtype_env_override(monkeypatch):
+    """The WAN_STUDIO_MPS_DTYPE escape hatch lets us A/B fp16 per model."""
+    monkeypatch.setenv("WAN_STUDIO_MPS_DTYPE", "float16")
+    backend = detect()
+    if backend.device == "mps":
+        assert backend.dtype == torch.float16
 
 
 def test_detect_cuda_uses_bfloat16():

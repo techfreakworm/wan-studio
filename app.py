@@ -362,11 +362,11 @@ def _export(frames, mode: str, fallback_message: str = "") -> str:
     Shared by every `_run_<mode>` runner."""
     import os
     import tempfile
-    from diffusers.utils import export_to_video
+    from pipelines.video_io import save_video  # imageio; diffusers export_to_video corrupts frames on MPS
 
     fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix=f"wan_{mode}_")
     os.close(fd)
-    export_to_video(frames, out_path, fps=16)
+    save_video(frames, out_path, fps=16)
     if fallback_message:
         gr.Info(fallback_message, duration=8)
     return out_path

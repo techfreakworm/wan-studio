@@ -34,10 +34,14 @@ class ModelCard:
     lightning_guidance: float             # 1.0 for CFG-distilled
     quality_steps: int
     quality_guidance: float
-    flow_shift: float
+    flow_shift: float                     # QUALITY-preset scheduler shift (euler)
     zerogpu_duration: int                 # seconds for one run at Fast preset
     mirror_repo: str = ""                 # bf16 mirror (techfreakworm/<slug>-bf16); defaulted post-init
     quality_guidance_2: float | None = None  # MoE low-noise stage; None for non-MoE
+    # FAST/Lightning scheduler shift. Lightning is a *distilled* sampler calibrated to a
+    # specific noise schedule — it must run at the shift it was distilled with, NOT the
+    # quality shift, or output goes soft/washed. lightx2v/ComfyUI Fast use shift≈5.0.
+    lightning_flow_shift: float = 5.0
     notes: str = ""
 
     def __post_init__(self):
