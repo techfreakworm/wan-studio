@@ -23,6 +23,10 @@ import gradio as gr
 # can't generate out-of-the-box). On HF Spaces (real GPU) keep the longer default.
 _LOCAL_MPS = os.getenv("SPACES_ZERO_GPU") is None
 _DUR_DEFAULT = 1.0 if _LOCAL_MPS else 3.4
+# On local MPS the memory guard refuses anything past ~17-21 frames (no chunked VAE
+# decode), so durations above ~1.3s are silently rejected at Generate. Cap the slider
+# to the usable range locally instead of exposing a mostly-non-functional 0.5-5.1s.
+_DUR_MAX = 1.3 if _LOCAL_MPS else 5.1
 
 
 RESOLUTION_PRESETS = [
@@ -46,7 +50,11 @@ def _two_col(input_builder, output_builder):
 
 def _output_column(default_eta: str = "~?s"):
     video = gr.Video(label="Output", autoplay=True, loop=True, interactive=False)
-    eta = gr.Markdown(f"⌚ ZeroGPU reservation: **{default_eta}**")
+    eta = gr.Markdown(
+        "⌚ Local MPS — first run loads the model; **heavy modes (FLF2V ~1.5h, VACE ~45m, "
+        "S2V/Animate several min) are slow.**"
+        if _LOCAL_MPS else f"⌚ ZeroGPU reservation: **{default_eta}**"
+    )
     progress = gr.HTML(visible=False)
     with gr.Row():
         with gr.Column(scale=1, min_width=70):
@@ -110,7 +118,7 @@ def build_t2v_tab() -> dict:
                 resolution = gr.Dropdown(
                     choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
-                duration = gr.Slider(0.5, 5.1, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
+                duration = gr.Slider(0.5, _DUR_MAX, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()
             generate = gr.Button("Generate", variant="primary", size="lg")
             return {"prompt": prompt, "enhance": enhance, "resolution": resolution,
@@ -139,7 +147,7 @@ def build_i2v_tab() -> dict:
                 resolution = gr.Dropdown(
                     choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
-                duration = gr.Slider(0.5, 5.1, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
+                duration = gr.Slider(0.5, _DUR_MAX, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()
             generate = gr.Button("Generate", variant="primary", size="lg")
             return {"image": image, "prompt": prompt, "resolution": resolution,
@@ -258,7 +266,12 @@ def build_s2v_tab() -> dict:
                     choices=RESOLUTION_PRESETS + ["1024x704 (S2V default)"],
                     value="1024x704 (S2V default)", label="Resolution",
                 )
-                duration = gr.Markdown("Duration: **auto** (driven by audio length)")
+                duration = gr.Markdown(
+                    "Duration: **~1s (17 frames), 832×480** — fixed on local MPS. "
+                    "(Full audio-length output needs chunked decode, not supported here; "
+                    "resolution + pose-video inputs are placeholders in this build.)"
+                    if _LOCAL_MPS else "Duration: **auto** (driven by audio length)"
+                )
             advanced = _advanced_accordion()
             generate = gr.Button("Generate", variant="primary", size="lg")
             return {

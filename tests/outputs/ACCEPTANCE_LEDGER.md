@@ -49,6 +49,15 @@ Local app: `WAN_STUDIO_PORT=7863 python app.py`, driven via Playwright MCP.
 - [x] **UX fix 2** — VACE no-source default 81f→17f local (was 568GB static → refused).
 - [x] **BUG FIX** — FLF2V defaulted to 81f@720p AND had NO memory guard → silent OOM risk on MPS. Capped 81→13f local + added _assert_mps_memory_safe. (Both HF Spaces keep 81f.)
 - **VERDICT: 8/8 mode tabs fully verified end-to-end in-UI (rendered video + frame-PASSED + eyeballed). All UI controls verified (Wan 2.1↔2.2, Fast↔Quality). 3 real local-MPS UX/safety bugs found + fixed.**
+
+## Phase B-2 — UX gap fixes (post gap-audit, Playwright-verified)
+- [x] **Disable Fast where it doesn't work** — Fast (Lightning) exists only for t2v_14b + i2v; the other 8 keys coerce Fast→Quality (`preset.py:31`). The header Fast pill now visibly DISABLES (greyed, pointer-events:none, line-through, tooltip) on the 6 non-Lightning tabs (flf2v/v2v/vace/ti2v/s2v/animate) and force-clicks Quality, via nav-JS toggling `.ws-fast-locked` on the preset GROUP (survives Gradio's per-click button elem_classes rewrite — a class on the button itself gets clobbered). Verified all 8 tabs: t2v/i2v unlocked, other 6 locked (computed opacity 0.32, pointer-events none).
+- [x] **Dev banner** ("don't run inference — ZeroGPU quota") now ZeroGPU-only — hidden on local MPS (was misleading; no ZeroGPU locally).
+- [x] **ETA text** local-honest ("Local MPS — heavy modes FLF2V ~1.5h, VACE ~45m… slow") instead of the bogus "ZeroGPU reservation ~Ns".
+- [x] **Duration slider** capped 5.1s→1.3s locally (range past ~1.3s was silently refused by the guard).
+- [x] **"Demo mode — Generate disabled"** About/toast copy fixed (modes ARE wired).
+- [x] **S2V duration label** "auto (driven by audio)" → honest "~1s/17f/832×480 fixed; resolution+pose-video are placeholders".
+- [x] Regression: T2V still generates in-UI after edits (832×480/17f, autocorr 0.889, PASS).
 - Note: Gradio sliders don't accept synthetic/keyboard Playwright events (Svelte store) — drive frame count via the MPS-safe defaults, not slider manipulation.
 - 3 distinct app-integration patterns all verified in-UI: text/image-diffusers (T2V/I2V/V2V/VACE/TI2V), scoped-subprocess (S2V), CPU-preproc+in-process-handle (Animate).
 

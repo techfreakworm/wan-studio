@@ -1334,6 +1334,15 @@ button.ws-pill-active {
      the segmented control — the sticky header already owns the bottom hairline. */
   box-shadow: inset 0 0 0 1px #5e84ff !important;
 }
+/* Fast pill disabled on modes without a Lightning LoRA. The nav JS toggles
+   .ws-fast-locked on the preset GROUP (survives Gradio's per-click button
+   elem_classes rewrites, which a class on the button itself would not). */
+.ws-preset-group.ws-fast-locked #ws-preset-fast {
+  opacity: 0.32 !important;
+  pointer-events: none !important;
+  cursor: not-allowed !important;
+  text-decoration: line-through !important;
+}
 
 /* ─── Chrome nav buttons ───────────────────────────────────────────── */
 .ws-chrome-actions {
@@ -2178,16 +2187,20 @@ def build() -> gr.Blocks:
         css=CSS,
     ) as demo:
         # ── Dev banner (top of every page) ───────────────────────────────
-        gr.HTML(
-            '<div class="ws-dev-banner">'
-            '<span class="ws-dev-icon"></span>'
-            '<span><b>Wan Studio is in active development.</b> '
-            'Please don\'t run inference — every GPU click burns the maintainer\'s '
-            'ZeroGPU quota. Follow along at '
-            '<a href="https://github.com/techfreakworm/wan-studio" target="_blank" rel="noopener">github.com/techfreakworm/wan-studio</a>.'
-            '</span></div>',
-            elem_id="ws-dev-banner",
-        )
+        # Only on ZeroGPU, where the "don't burn quota" warning is true. Locally
+        # (MPS) there is no ZeroGPU quota — the banner was misleading, and the
+        # local-backend chip below already shows the real status.
+        if backend.is_zerogpu:
+            gr.HTML(
+                '<div class="ws-dev-banner">'
+                '<span class="ws-dev-icon"></span>'
+                '<span><b>Wan Studio is in active development.</b> '
+                'Please don\'t run inference — every GPU click burns the maintainer\'s '
+                'ZeroGPU quota. Follow along at '
+                '<a href="https://github.com/techfreakworm/wan-studio" target="_blank" rel="noopener">github.com/techfreakworm/wan-studio</a>.'
+                '</span></div>',
+                elem_id="ws-dev-banner",
+            )
 
         # ── Header ───────────────────────────────────────────────────────
         header = build_header()
@@ -2283,6 +2296,28 @@ def build() -> gr.Blocks:
             if (side) side.classList.add('ws-side-btn-active');
             var panel = document.getElementById('tab-' + key);
             if (panel) panel.classList.add('ws-mode-panel-active');
+            // Fast (Lightning) only exists for T2V + I2V. On every other mode
+            // tab, disable the Fast pill and force Quality so it can't silently
+            // no-op (resolve() coerces Fast->Quality backend-side, but the pill
+            // shouldn't claim a speed it can't deliver — e.g. FLF2V "Fast" = 108min).
+            // The disabled STYLE lives on the preset-group container (not the Fast
+            // button) because Gradio's _set_preset handler rewrites the button's
+            // elem_classes on every Quality/Fast click and would clobber a class set
+            // directly on the button. The group is never re-rendered, so it persists.
+            var FAST_OK = (key === 't2v' || key === 'i2v');
+            var group = document.querySelector('.ws-preset-group');
+            var fastBtn = document.getElementById('ws-preset-fast');
+            var qualBtn = document.getElementById('ws-preset-quality');
+            if (group && fastBtn && qualBtn) {
+              if (FAST_OK) {
+                group.classList.remove('ws-fast-locked');
+                fastBtn.removeAttribute('title');
+              } else {
+                group.classList.add('ws-fast-locked');
+                fastBtn.setAttribute('title', 'Fast (Lightning) is only available for Text→Video and Image→Video');
+                if (fastBtn.classList.contains('ws-pill-active')) { qualBtn.click(); }
+              }
+            }
             // On mobile, picking a mode collapses the drawer so the
             // tab content is visible immediately. No-op at ≥768px.
             if (isDrawerViewport()) closeDrawer();
@@ -2357,7 +2392,7 @@ def build() -> gr.Blocks:
         # (large/xlarge by spec.tier); unregistered modes keep the no-op toast
         # until their pipelines land in later waves.
         def _generate_toast():
-            gr.Info("Demo mode — Generate disabled while design direction is being chosen.")
+            gr.Info("This mode isn't wired yet.")
 
         # Common trailing Advanced inputs, shared by every wired mode.
         def _advanced_inputs(tab_in: dict) -> list:
@@ -2502,7 +2537,9 @@ def build() -> gr.Blocks:
                 f"- Generation: **{generation}**\n"
                 f"- Available modes: {', '.join(modes)}\n"
                 f"- Preset: **{preset}**\n\n"
-                f"_Demo mode — Generate disabled while design direction is being chosen._"
+                f"_Local MPS build — all modes generate real video at short (MPS-safe) "
+                f"clip lengths. Fast (Lightning) applies only to T2V/I2V; other modes "
+                f"are Quality-only._"
             )
 
         header["generation"].change(
