@@ -624,7 +624,8 @@ def _run_flf2v(spec, ui_args, progress):
     if randomize:
         seed = random.randint(0, 2**31 - 1)
 
-    handle = REGISTRY.acquire(_key_for(spec.mode, generation))
+    key = _key_for(spec.mode, generation)
+    handle = REGISTRY.acquire(key)
     progress(0.05, desc="Loading model to GPU (first run is slower)…")
     pk = handle.configure_preset(_coerce_preset(preset_label))
     # Let the card drive CFG per preset (quality_guidance=5.5 / lightning_guidance=1.0)
@@ -632,12 +633,19 @@ def _run_flf2v(spec, ui_args, progress):
     # to a CFG-distilled-hostile 5.5 when the user didn't override.
     inf = _build_inference_kwargs(pk, steps, cfg, cfg_2)
 
+    # FLF2V's handle defaults to 81 frames @720p — a monolithic MPS decode that would
+    # OOM. Cap to the verified-safe 720p length locally + guard (this runner previously
+    # had NO memcheck). HF Spaces (real GPU) keeps the full 81.
+    num_frames = 81 if os.getenv("SPACES_ZERO_GPU") else 13
+    _assert_mps_memory_safe(key, num_frames, "720p")
+
     progress(0.2, desc="Generating frames…")
     out = handle.generate(
         start_frame,
         last,
         prompt,
         negative_prompt=negative_prompt or "",
+        num_frames=num_frames,
         seed=int(seed),
         preset_kwargs=inf,
     )
@@ -703,10 +711,14 @@ def _run_vace(spec, ui_args, progress):
         progress(0.15, desc="Decoding source video…")
         src_frames, h, w = decode_video(source_video, handle.pipe, 480 * 832)
 
+    # VACE's native length is 81 frames; on local MPS that decode is far past the safe
+    # envelope (~568GB static), so with no source video (Reference/T2V-style submodes)
+    # default to an MPS-safe length. HF Spaces (real GPU) keeps 81.
+    _vace_default_n = 81 if os.getenv("SPACES_ZERO_GPU") else 17
     try:
         plan = resolve_submode(
             submode, source_frames=src_frames, references=refs,
-            height=h, width=w, num_frames=(len(src_frames) if src_frames else 81),
+            height=h, width=w, num_frames=(len(src_frames) if src_frames else _vace_default_n),
         )
     except ValueError as e:
         raise gr.Error(str(e))
@@ -716,7 +728,7 @@ def _run_vace(spec, ui_args, progress):
     # num_frames down but keeps every conditioning frame → conditioning_latents has
     # more temporal frames than the noise latents and the control signal misaligns
     # (pipeline_wan_vace.py:836-840 / 941 warn-only). video/mask are already equal-length.
-    raw_n = len(plan.video) if plan.video else 81
+    raw_n = len(plan.video) if plan.video else _vace_default_n
     vsft = getattr(handle.pipe, "vae_scale_factor_temporal", 4) or 4
     num_frames = max(raw_n // vsft * vsft + 1, 1)
     _assert_mps_memory_safe(_key_for(spec.mode, generation), num_frames)
@@ -810,10 +822,133 @@ def _run_ti2v(spec, ui_args, progress):
     return _export(frames, "ti2v", preset_kwargs.fallback_message)
 
 
+def _run_s2v(spec, ui_args, progress):
+    """S2V body (Wan 2.2): reference image + driving audio → talking-character video.
+    Runs the upstream wan.WanS2V port as a SCOPED SUBPROCESS (scripts/s2v_smoke.py) so
+    its process-global MPS shims (device cuda→mps, float64→fp32, autocast remap,
+    flash_attention replacement) stay isolated from the diffusers modes. Frees the app's
+    warm models first — the subprocess needs ~110GB of unified memory."""
+    import os
+    import tempfile
+    from PIL import Image
+    from pipelines.s2v import run_s2v_subprocess
+
+    (reference_image, audio, generation, preset_label, resolution, prompt,
+     negative_prompt, seed, randomize, steps_override, cfg_override,
+     cfg_2_override) = ui_args
+
+    if reference_image is None:
+        raise gr.Error("S2V needs a reference character image.")
+    if not audio:
+        raise gr.Error("S2V needs a driving audio clip (upload or record).")
+
+    img = reference_image
+    if isinstance(img, str):
+        img_path = img
+    else:
+        if hasattr(img, "convert"):
+            img = img.convert("RGB")
+        fd, img_path = tempfile.mkstemp(suffix=".png", prefix="s2v_ref_")
+        os.close(fd)
+        img.save(img_path)
+    audio_path = audio if isinstance(audio, str) else str(audio)
+
+    # S2V on MPS is ~75s/step (chunked-flash + RoPE CPU fallback). Default to a
+    # tractable interactive step count; override via the Advanced "Steps" slider or
+    # WAN_S2V_APP_STEPS. 8 steps gives valid talking-head output (between the proven
+    # 4-step smoke and the 16-step quality run).
+    steps = int(steps_override) if steps_override else int(os.getenv("WAN_S2V_APP_STEPS", "8"))
+    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wan_s2v_")
+    os.close(fd)
+
+    progress(0.05, desc="Freeing app models for S2V subprocess…")
+    REGISTRY.free_all()
+    progress(0.15, desc="S2V subprocess: loading 14B + generating (several minutes)…")
+    run_s2v_subprocess(
+        img_path, audio_path, prompt, out_path,
+        frames=17, steps=steps, size="832*480",
+        progress_cb=lambda s: progress(0.5, desc=f"S2V sampling: {s}"),
+    )
+    progress(0.95, desc="Done.")
+    return out_path
+
+
+def _run_animate(spec, ui_args, progress):
+    """Animate body (Wan 2.2): character image + driving video → animated character.
+    ViTPose/YOLO pose+face preprocessing runs on CPU (scripts/animate_preprocess.py
+    subprocess — isolates its vendored-utils sys.path collision), then the
+    WanAnimatePipeline on MPS via the in-process handle."""
+    import os
+    import random
+    import subprocess
+    import sys
+    import tempfile
+    import imageio.v2 as imageio
+    from PIL import Image
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    (character, driving, mode, res, prompt,
+     negative_prompt, seed, randomize, steps_override, cfg_override,
+     cfg_2_override) = ui_args
+
+    if character is None:
+        raise gr.Error("Animate needs a character reference image.")
+    if not driving:
+        raise gr.Error("Animate needs a driving / template video.")
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    img = character
+    if isinstance(img, str):
+        img = Image.open(img).convert("RGB")
+    elif hasattr(img, "convert"):
+        img = img.convert("RGB")
+
+    is_720 = "720" in (res or "")
+    height, width = (1280, 720) if is_720 else (832, 480)
+    num_frames = 13  # safe verified length on this MPS box
+
+    progress(0.05, desc="Pose+face preprocessing (CPU, ~30s)…")
+    pre_out = tempfile.mkdtemp(prefix="animate_pre_")
+    env = dict(os.environ)
+    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    pre = subprocess.run(
+        [sys.executable, os.path.join(repo_root, "scripts", "animate_preprocess.py"),
+         "--video", driving, "--out", pre_out, "--frames", str(num_frames),
+         "--area", str(height * width)],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=600,
+    )
+    pose_mp4 = os.path.join(pre_out, "src_pose.mp4")
+    face_mp4 = os.path.join(pre_out, "src_face.mp4")
+    if pre.returncode != 0 or not os.path.exists(pose_mp4):
+        raise gr.Error(f"Pose preprocessing failed: {(pre.stderr or pre.stdout)[-300:]}")
+    pose_video = [Image.fromarray(f) for f in imageio.mimread(pose_mp4, memtest=False)]
+    face_video = [Image.fromarray(f) for f in imageio.mimread(face_mp4, memtest=False)]
+
+    key = _key_for(spec.mode, "wan2.2")
+    handle = REGISTRY.acquire(key)
+    progress(0.4, desc="Loading Animate model…")
+    pk = handle.configure_preset(_coerce_preset("quality"))
+    inf = _build_inference_kwargs(pk, steps_override, cfg_override, cfg_2_override)
+    _assert_mps_memory_safe(key, num_frames, "720p" if is_720 else "480p")
+
+    progress(0.5, desc="Animating…")
+    out = handle.generate(
+        img, pose_video, face_video,
+        prompt=prompt or "a person, natural motion, cinematic",
+        negative_prompt=negative_prompt or "",
+        height=height, width=width, segment_frame_length=num_frames,
+        seed=int(seed), preset_kwargs=inf,
+        step_callback=_make_step_progress(progress),
+    )
+    progress(0.9, desc="Encoding MP4…")
+    return _export(out, "animate", pk.fallback_message)
+
+
 # Per-mode body dispatch. Append-only: a new wired mode adds its `_run_*` here.
 _MODE_RUNNERS = {
     "t2v": _run_t2v, "i2v": _run_i2v, "flf2v": _run_flf2v, "v2v": _run_v2v,
-    "vace": _run_vace, "ti2v": _run_ti2v,
+    "vace": _run_vace, "ti2v": _run_ti2v, "s2v": _run_s2v, "animate": _run_animate,
 }
 
 
@@ -2270,6 +2405,26 @@ def build() -> gr.Blocks:
                     hdr["preset_state"],
                     tab_in["source_video"],
                     tab_in["references"],
+                    tab_in["prompt"],
+                ] + _advanced_inputs(tab_in)
+            # S2V: (reference_image, audio, generation, preset, resolution, prompt,
+            #       *advanced). pose_video + duration(markdown) are UI-only in v1.
+            if mode == "s2v":
+                return [
+                    tab_in["reference_image"],
+                    tab_in["audio"],
+                    hdr["generation"],
+                    hdr["preset_state"],
+                    tab_in["resolution"],
+                    tab_in["prompt"],
+                ] + _advanced_inputs(tab_in)
+            # ANIMATE: (character, driving, mode, res, prompt, *advanced).
+            if mode == "animate":
+                return [
+                    tab_in["character"],
+                    tab_in["driving"],
+                    tab_in["mode"],
+                    tab_in["res"],
                     tab_in["prompt"],
                 ] + _advanced_inputs(tab_in)
             # TI2V: (image, prompt, generation, preset, orientation, *advanced).

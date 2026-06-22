@@ -24,6 +24,7 @@ from pipelines.flf2v import FLF2VHandle  # noqa: F401
 from pipelines.vace import VACEHandle  # noqa: F401
 from pipelines.ti2v import TI2VHandle  # noqa: F401
 from pipelines.animate import AnimateHandle  # noqa: F401
+from pipelines.s2v import S2VHandle, run_s2v_subprocess  # noqa: F401
 from pipelines.handlers import HANDLER_REGISTRY, HandlerSpec, register  # noqa: F401
 
 # MPS correctness patches (no-op off MPS): query+key-chunked flash attention for

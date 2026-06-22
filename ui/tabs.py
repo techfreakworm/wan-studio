@@ -13,7 +13,16 @@ Phase 1+ will plug `pipelines.{t2v,i2v,...}` into the Generate buttons.
 """
 from __future__ import annotations
 
+import os
+
 import gradio as gr
+
+# On local MPS the safe VAE-decode envelope caps generation at ~17 frames (480p 14B);
+# the duration→frames map floors at 17. The default duration must land there or every
+# default generation hits the memory guard (3.4s → 53 frames → refused → the local UI
+# can't generate out-of-the-box). On HF Spaces (real GPU) keep the longer default.
+_LOCAL_MPS = os.getenv("SPACES_ZERO_GPU") is None
+_DUR_DEFAULT = 1.0 if _LOCAL_MPS else 3.4
 
 
 RESOLUTION_PRESETS = [
@@ -101,7 +110,7 @@ def build_t2v_tab() -> dict:
                 resolution = gr.Dropdown(
                     choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
-                duration = gr.Slider(0.5, 5.1, value=3.4, step=0.1, label="Duration (s)")
+                duration = gr.Slider(0.5, 5.1, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()
             generate = gr.Button("Generate", variant="primary", size="lg")
             return {"prompt": prompt, "enhance": enhance, "resolution": resolution,
@@ -130,7 +139,7 @@ def build_i2v_tab() -> dict:
                 resolution = gr.Dropdown(
                     choices=RESOLUTION_PRESETS, value="832x480 (16:9)", label="Resolution",
                 )
-                duration = gr.Slider(0.5, 5.1, value=3.0, step=0.1, label="Duration (s)")
+                duration = gr.Slider(0.5, 5.1, value=_DUR_DEFAULT, step=0.1, label="Duration (s)")
             advanced = _advanced_accordion()
             generate = gr.Button("Generate", variant="primary", size="lg")
             return {"image": image, "prompt": prompt, "resolution": resolution,

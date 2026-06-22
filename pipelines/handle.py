@@ -535,6 +535,29 @@ class ModelRegistry:
             if child.is_dir() and child.name not in keep:
                 shutil.rmtree(child, ignore_errors=True)
 
+    def free_all(self) -> None:
+        """Fully release EVERY warm handle (GPU + CPU) and empty the cache. Used before
+        spawning a memory-heavy out-of-process job (e.g. the S2V scoped subprocess, which
+        needs ~110GB of unified memory) so the app's resident models don't co-occupy it."""
+        for handle in list(self._handles.values()):
+            try:
+                handle.unload_to_cpu()
+            except Exception:
+                pass
+            handle.pipe = None
+        self._handles.clear()
+        self._lru.clear()
+        self.warm_key = None
+        gc.collect()
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def acquire(self, key: str) -> WanModelHandle:
         from pipelines.trace import trace
         if key not in BY_KEY:
