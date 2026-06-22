@@ -345,6 +345,67 @@ def _assert_fits(key: str, steps, resolution_label: str, duration_s) -> None:
         )
 
 
+def _assert_mps_memory_safe(key: str, num_frames: int, resolution_label: str = "") -> None:
+    """LOCAL MPS only: refuse a clip whose estimated peak driver memory would risk
+    thrashing/crashing the OS. The app has no ZeroGPU isolation locally — a prior
+    over-long run swap-thrashed the box. CUDA/ZeroGPU has discrete VRAM + a releasing
+    allocator, so this is a no-op there. Calibrated to measured driver_allocated."""
+    from utils.backend import detect
+    if detect().device != "mps":
+        return
+    import sys as _sys
+    _scripts = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "scripts")
+    if _scripts not in _sys.path:
+        _sys.path.insert(0, _scripts)
+    from memcheck import (estimate_mps_real_gb, estimate_peak_gb, free_gb,
+                          HARD_CAP_GB, MPS_REAL_GB_PER_LATENT)
+    res = "720p" if ("720" in (resolution_label or "") or "1280" in (resolution_label or "")) else "480p"
+    # PRIMARY co-gate (wan-brain C1): the conservative STATIC envelope is the only one
+    # PROVEN safe. The real model UNDER-estimates VAE decode at high latent-frame counts
+    # (a 13-latent 480p decode OOM-killed the process historically) — so a pure real-model
+    # gate would authorize a panic-class monolithic decode. Refuse anything outside the
+    # static-safe envelope; real-length needs temporal-chunked decode (out of scope).
+    static = estimate_peak_gb(key, int(num_frames), res)
+    if not static["safe"]:
+        # largest static-safe frame count for this model/res (latent steps of 4 px frames).
+        safe_f = int(num_frames)
+        while safe_f > 5 and not estimate_peak_gb(key, safe_f, res)["safe"]:
+            safe_f -= 4
+        raise gr.Error(
+            f"On local MPS, {int(num_frames)} frames @ {res} exceeds the safe VAE-decode "
+            f"envelope (static peak ~{static['peak_gb']}GB > {static['hard_cap_gb']:.0f}GB cap) — "
+            f"a monolithic decode this large can OOM/crash the machine. Try ~{safe_f} frames or "
+            f"fewer (real-length output needs chunked VAE decode, not yet implemented)."
+        )
+    est = estimate_mps_real_gb(key, int(num_frames), res)
+    # C1 backstop (wan-brain): an ABSOLUTE ceiling independent of momentary free RAM.
+    # A monolithic (non-chunked) VAE decode beyond this is panic-class on this 128GB
+    # box (e.g. 720p@81f ≈ 144GB real). The free-margin check below is necessary but
+    # not sufficient — on a freshly-booted box with lots of free RAM it could otherwise
+    # authorize a panic-class clip. Real-length clips need temporal-chunked decode (TODO).
+    ABS_REAL_CAP_GB = 100.0
+    if est["real_gb"] > ABS_REAL_CAP_GB:
+        raise gr.Error(
+            f"On local MPS, ~{int(num_frames)} frames @ {res} needs ~{est['real_gb']:.0f}GB for a "
+            f"monolithic VAE decode — above the safe {ABS_REAL_CAP_GB:.0f}GB ceiling. Use fewer "
+            f"frames or lower resolution (real-length output needs chunked VAE decode)."
+        )
+    # Gate on REAL free system memory (vm_stat-based), not the lying driver counter. Leave
+    # an OS+app headroom margin. driver_allocated over-reports ~6x; using it would refuse
+    # clips that actually use a fraction of the claimed memory.
+    free = free_gb()
+    margin = 24.0
+    if est["real_gb"] > free - margin:
+        budget = max(0.0, free - margin - (est["real_gb"] - est["runtime_gb"]))
+        safe_lat = max(1, int(budget / max(0.1, MPS_REAL_GB_PER_LATENT)))
+        safe_frames = max(17, (safe_lat - 1) * 4 + 1)
+        raise gr.Error(
+            f"On local MPS, ~{int(num_frames)} frames needs ~{est['real_gb']:.0f}GB but only "
+            f"~{free:.0f}GB is free. Close other apps, shorten to ~{(safe_frames - 1) / 16:.1f}s, "
+            f"or use the lighter 1.3B model."
+        )
+
+
 def _make_step_progress(progress, lo: float = 0.2, hi: float = 0.92):
     """Build an `on_step(done, total)` that advances the Gradio progress bar per
     denoise step. Passed to handle.generate → diffusers callback_on_step_end, so
@@ -416,6 +477,7 @@ def _run_t2v(spec, ui_args, progress):
     height, width = _parse_resolution(resolution_label)
     # Wan VAE temporal patching: num_frames must be 4k+1.
     num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+    _assert_mps_memory_safe(key, num_frames, resolution_label)
 
     progress(0.2, desc="Generating frames…")
     frames = handle.generate(
@@ -478,6 +540,7 @@ def _run_i2v(spec, ui_args, progress):
     h_label, w_label = _parse_resolution(resolution_label)
     max_area = h_label * w_label
     num_frames = max(17, int(float(duration_s) * 16) // 4 * 4 + 1)
+    _assert_mps_memory_safe(key, num_frames, resolution_label)
 
     progress(0.2, desc="Generating frames…")
     trace(f"generate START (num_frames={num_frames}, steps={inference_kwargs.get('num_inference_steps')})")
@@ -521,6 +584,7 @@ def _run_v2v(spec, ui_args, progress):
 
     progress(0.2, desc="Decoding source video…")
     frames_in, _, _ = decode_video(video, handle.pipe, 480 * 832)
+    _assert_mps_memory_safe(_key_for(spec.mode, generation), len(frames_in))
 
     progress(0.3, desc="Restyling frames…")
     out = handle.generate(
@@ -655,6 +719,7 @@ def _run_vace(spec, ui_args, progress):
     raw_n = len(plan.video) if plan.video else 81
     vsft = getattr(handle.pipe, "vae_scale_factor_temporal", 4) or 4
     num_frames = max(raw_n // vsft * vsft + 1, 1)
+    _assert_mps_memory_safe(_key_for(spec.mode, generation), num_frames)
     plan_video = _snap_vace_frames(plan.video, num_frames)
     plan_mask = _snap_vace_frames(plan.mask, num_frames)
 
@@ -696,10 +761,59 @@ def _run_vace(spec, ui_args, progress):
     return _export(out, "vace", pk.fallback_message)
 
 
+def _run_ti2v(spec, ui_args, progress):
+    """TI2V body (Wan 2.2-5B): text+image→video. Fixed-resolution via an orientation
+    radio (1280×704 / 704×1280, no resolution/duration sliders). Short safe length —
+    real-length (121f) needs temporal-chunked VAE decode (out of scope), and the
+    C1 backstop + memcheck would refuse a monolithic long 720p decode anyway."""
+    import random
+    from PIL import Image
+
+    (image, prompt, generation, preset_label, orientation,
+     negative_prompt, seed, randomize, steps_override, cfg_override,
+     cfg_2_override) = ui_args
+
+    if image is None:
+        raise gr.Error("TI2V needs an init image (text+image→video).")
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("Prompt is required.")
+    if isinstance(image, str):
+        image = Image.open(image).convert("RGB")
+    elif hasattr(image, "convert"):
+        image = image.convert("RGB")
+    if randomize:
+        seed = random.randint(0, 2**31 - 1)
+
+    # Orientation radio → the only two supported resolutions.
+    height, width = (1280, 704) if "Portrait" in (orientation or "") else (704, 1280)
+
+    preset = _coerce_preset(preset_label)
+    key = _key_for(spec.mode, generation)
+    handle = REGISTRY.acquire(key)
+    progress(0.05, desc="Loading model to GPU (first run is slower)…")
+    preset_kwargs = handle.configure_preset(preset)
+    inference_kwargs = _build_inference_kwargs(
+        preset_kwargs, steps_override, cfg_override, cfg_2_override
+    )
+    num_frames = 13  # safe verified length on this MPS box; real-length = future chunked decode
+    _assert_mps_memory_safe(key, num_frames, "720p")
+
+    progress(0.2, desc="Generating frames…")
+    frames = handle.generate(
+        image, prompt,
+        negative_prompt=negative_prompt or "",
+        height=height, width=width, num_frames=num_frames,
+        seed=int(seed), preset_kwargs=inference_kwargs,
+        step_callback=_make_step_progress(progress),
+    )
+    progress(0.9, desc="Encoding MP4…")
+    return _export(frames, "ti2v", preset_kwargs.fallback_message)
+
+
 # Per-mode body dispatch. Append-only: a new wired mode adds its `_run_*` here.
 _MODE_RUNNERS = {
     "t2v": _run_t2v, "i2v": _run_i2v, "flf2v": _run_flf2v, "v2v": _run_v2v,
-    "vace": _run_vace,
+    "vace": _run_vace, "ti2v": _run_ti2v,
 }
 
 
@@ -2157,6 +2271,16 @@ def build() -> gr.Blocks:
                     tab_in["source_video"],
                     tab_in["references"],
                     tab_in["prompt"],
+                ] + _advanced_inputs(tab_in)
+            # TI2V: (image, prompt, generation, preset, orientation, *advanced).
+            # Fixed-resolution (orientation radio, no resolution/duration sliders).
+            if mode == "ti2v":
+                return [
+                    tab_in["image"],
+                    tab_in["prompt"],
+                    hdr["generation"],
+                    hdr["preset_state"],
+                    tab_in["orientation"],
                 ] + _advanced_inputs(tab_in)
             lead = [tab_in["image"], tab_in["prompt"]] if mode == "i2v" else [tab_in["prompt"]]
             return lead + [

@@ -32,6 +32,12 @@ def conversion_plan(card: ModelCard) -> ConversionPlan | None:
         return None  # vendored — deferred to #3
     convert = ["transformer"] + (["transformer_2"] if card.is_moe else [])
     keep = set(_BASE_KEEP)
+    # TI2V-5B ships its OWN VAE (AutoencoderKLWan z_dim=48, 16×16×4) — NOT the shared
+    # Wan 2.1 VAE (z_dim=16) injected at load. Keep it (copied as-is, small ~1-2GB fp32;
+    # the handler from_pretrains it with torch_dtype=bf16). Without this the converted
+    # mirror has no vae/ and ti2v.py can't build.
+    if card.mode == "ti2v":
+        keep |= {"vae"}
     # Keep image_processor for ANY image-conditioned card (I2V/FLF2V/Animate):
     # it's a tiny config that WanImageToVideoPipeline.from_pretrained may require
     # if model_index.json lists it, and the handler doesn't inject it. A

@@ -34,3 +34,10 @@ Thumbs.db
 
 # Codex generated images (local-only)
 ~/.codex/
+
+# Vendored upstream Wan2.2 (cloned locally for the S2V port; has its own .git, 18M).
+# Obtain via: git clone https://github.com/Wan-Video/Wan2.2 vendor/Wan2.2
+vendor/
+
+# Large local wireframe render artifacts
+wireframes/_codex_smoketest.png

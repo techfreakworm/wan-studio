@@ -131,6 +131,53 @@ def estimate_peak_gb(model: str, frames: int, res: str = "480p",
         "safe": peak <= HARD_CAP_GB,
     }
 
+# ── MEASURED MPS driver-allocated model (bf16 VAE, 2026-06) ───────────────────
+# The static estimate_peak_gb above is worst-case (over-refuses). These constants are
+# CALIBRATED to measured torch.mps.driver_allocated_memory():
+#   - decode-only driver grows ~9-10.5 GB / latent-frame (probe: lf=3/6/9/13 = 27/55/84/122GB)
+#   - full 14B @17f (5 latent) gen+decode measured 92.4GB; 28(tx)+11(enc)+10.5*5 = 91.5 ✓
+#   - observed: ~92GB ran clean, 122GB completed, ~195GB THRASHED the OS (64M swapouts).
+# Used by the LOCAL app guard (app.py has no ZeroGPU isolation — a too-long clip can thrash
+# the box). Keep driver under MPS_DRIVER_SAFE_GB. Transformer stays resident during decode,
+# so heavy models (14B) hit the ceiling at shorter lengths than the light 1.3B.
+MPS_DECODE_GB_PER_LATENT = 10.5
+MPS_DRIVER_SAFE_GB = 128.0   # below the ~150-195GB thrash zone, above the 122GB that completed
+
+def estimate_mps_driver_gb(model: str, frames: int, res: str = "480p") -> dict:
+    tx = _TX_BF16_GB.get(model, 28.0)
+    lf = _latent_frames(frames)
+    enc = _TEXT_ENCODER_GB
+    clip = _CLIP_GB if any(s in model for s in ("i2v", "flf2v", "animate", "s2v")) else 0.0
+    spatial_mul = (45 * 80) / (30 * 52) if "720" in res else 1.0
+    decode = MPS_DECODE_GB_PER_LATENT * lf * spatial_mul
+    driver = tx + enc + clip + decode
+    return {"model": model, "frames": frames, "latent_frames": lf,
+            "driver_gb": round(driver, 1), "decode_gb": round(decode, 1),
+            "safe": driver <= MPS_DRIVER_SAFE_GB, "cap_gb": MPS_DRIVER_SAFE_GB}
+
+# ── REAL system-memory model — the TRUTH the OOM-killer sees ───────────────────
+# torch.mps.driver_allocated_memory() OVER-REPORTS ~6x (it counts reserved/cached Metal
+# pool, not live). MEASURED via vm_stat free-delta during a fresh decode: a 49f/13-latent
+# decode consumed ~21GB of REAL system memory while driver CLAIMED 122GB. So decode costs
+# ~1.6 GB / latent-frame of real memory — there is NO decode "wall". Generation adds the
+# resident transformer weights + modest activation. This is what the app guard gates on.
+# (current_allocated UNDER-reports — misses Metal scratch; RSS misses Metal entirely. Only
+# the system free-delta and this calibrated model reflect reality.)
+MPS_REAL_GB_PER_LATENT = 2.0   # decode measured ~1.6; rounded up to cover gen-activation overlap
+
+def estimate_mps_real_gb(model: str, frames: int, res: str = "480p") -> dict:
+    """Estimate REAL peak system memory (GB) — calibrated to vm_stat free-delta, not the
+    lying driver counter. Use with free_gb() to gate generation safely."""
+    tx = _TX_BF16_GB.get(model, 28.0)
+    lf = _latent_frames(frames)
+    enc = _TEXT_ENCODER_GB
+    clip = _CLIP_GB if any(s in model for s in ("i2v", "flf2v", "animate", "s2v")) else 0.0
+    spatial_mul = (45 * 80) / (30 * 52) if "720" in res else 1.0
+    runtime = MPS_REAL_GB_PER_LATENT * lf * spatial_mul + 8.0   # decode + gen activation + base
+    real = tx + enc + clip + runtime
+    return {"model": model, "frames": frames, "latent_frames": lf,
+            "real_gb": round(real, 1), "runtime_gb": round(runtime, 1)}
+
 def free_gb() -> float:
     """TRUE available memory (GB): total physical − genuinely-unavailable
     (wired + active + compressed). free/inactive/speculative/purgeable are all

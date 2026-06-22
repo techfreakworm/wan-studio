@@ -126,14 +126,18 @@ WAN_2_1: list[ModelCard] = [
         native_resolutions=("720p",), native_fps=16, frames_default=81,
         diffusers_class="WanImageToVideoPipeline",  # via last_image= kwarg
         is_moe=False, requires_image_encoder=True,
-        lightning_available=True,  # empirical — reuse I2V LoRA, not officially tested
-        lightning_lora_repo="Kijai/WanVideo_comfy",
-        lightning_high_lora="Lightx2v/lightx2v_I2V_14B_720p_cfg_step_distill_rank128_bf16.safetensors",
+        # Lightning DISABLED: there is NO usable bf16 720p-i2v Lightning LoRA (lightx2v
+        # ships fp8/int8 only — Metal-hostile; Kijai has 480p only). The "empirical
+        # reuse" path 404s. flf2v is Quality-only on MPS (key-chunked flash makes 720p
+        # Quality correct — see mps_patches). 2026-06-22.
+        lightning_available=False,
+        lightning_lora_repo=None,
+        lightning_high_lora=None,
         lightning_low_lora=None,
         lightning_steps=4, lightning_guidance=1.0,
         quality_steps=40, quality_guidance=5.5, flow_shift=5.0,
         zerogpu_duration=150,
-        notes="Lightning empirical via I2V LoRA. Chinese prompts recommended.",
+        notes="Quality-only on MPS (no bf16 720p Lightning LoRA exists). Chinese prompts recommended.",
     ),
     ModelCard(
         key="wan2.1_vace_1.3b",
@@ -191,17 +195,24 @@ WAN_2_2: list[ModelCard] = [
     ModelCard(
         key="wan2.2_ti2v_5b",
         generation="wan2.2", mode="ti2v",
-        repo="Wan-AI/Wan2.2-TI2V-5B",
+        repo="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         size="5B",
         native_resolutions=("720p",), native_fps=24, frames_default=121,
-        diffusers_class=None,  # NOT in diffusers — use upstream wan.WanTI2V
+        # B2 fix (2026-06-21): TI2V-5B IS in diffusers as WanPipeline (Tier-3 spike).
+        # The old diffusers_class=None made conversion_plan() skip it. Dense 5B
+        # (is_moe=False → single transformer). It ships its OWN 16×16×4 VAE (NOT the
+        # shared Wan 8×8×4 VAE) → the ti2v.py handler loads that VAE from this repo,
+        # not shared.vae(). Image conditioning is VAE-encoded (no CLIP), so
+        # requires_image_encoder stays False. Confirm pipeline _class_name + whether
+        # a transformer_2 exists from model_index.json at build time.
+        diffusers_class="WanPipeline",
         is_moe=False, requires_image_encoder=False,
         lightning_available=False,
         lightning_lora_repo=None, lightning_high_lora=None, lightning_low_lora=None,
         lightning_steps=0, lightning_guidance=0.0,
         quality_steps=50, quality_guidance=5.0, flow_shift=5.0,
         zerogpu_duration=60,
-        notes="Vendor upstream `wan` package. Only 1280×704 / 704×1280 supported.",
+        notes="Own 16×16×4 VAE (not shared). Only 1280×704 / 704×1280 supported.",
     ),
     ModelCard(
         key="wan2.2_t2v_a14b",
@@ -212,9 +223,12 @@ WAN_2_2: list[ModelCard] = [
         diffusers_class="WanPipeline",
         is_moe=True, requires_image_encoder=False,
         lightning_available=True,
-        lightning_lora_repo="Kijai/WanVideo_comfy",
-        lightning_high_lora="wan2.2-t2v-a14b/lightning_high.safetensors",
-        lightning_low_lora="wan2.2-t2v-a14b/lightning_low.safetensors",
+        # bf16 MoE Lightning from the cached lightx2v/Wan2.2-Lightning repo (Seko-V1
+        # rank64). NOT the consolidated-mirror subpath (which lacks it) — these
+        # filenames don't start with the slug, so _lora_repo_for routes here.
+        lightning_lora_repo="lightx2v/Wan2.2-Lightning",
+        lightning_high_lora="Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+        lightning_low_lora="Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors",
         lightning_steps=4, lightning_guidance=1.0,
         quality_steps=40, quality_guidance=3.0, flow_shift=12.0,
         zerogpu_duration=120,
@@ -231,9 +245,11 @@ WAN_2_2: list[ModelCard] = [
         diffusers_class="WanImageToVideoPipeline",
         is_moe=True, requires_image_encoder=True,
         lightning_available=True,
-        lightning_lora_repo="Kijai/WanVideo_comfy",
-        lightning_high_lora="wan2.2-i2v-a14b/lightning_high.safetensors",
-        lightning_low_lora="wan2.2-i2v-a14b/lightning_low.safetensors",
+        # bf16 MoE Lightning from the cached lightx2v/Wan2.2-Lightning repo (Seko-V1
+        # rank64). Routes via _lora_repo_for to the upstream repo (not consolidated).
+        lightning_lora_repo="lightx2v/Wan2.2-Lightning",
+        lightning_high_lora="Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+        lightning_low_lora="Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors",
         lightning_steps=4, lightning_guidance=1.0,
         quality_steps=40, quality_guidance=3.5, flow_shift=8.0,
         zerogpu_duration=150,

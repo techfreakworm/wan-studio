@@ -26,6 +26,28 @@ if TYPE_CHECKING:
 SHARED_MOUNT = Path(os.getenv("WAN_STUDIO_MOUNT_ROOT", "/models")) / "wan-shared-encoders"
 SHARED_MIRROR_REPO = "techfreakworm/wan-shared-encoders"
 
+# Local (MPS dev) CLIP source. The bf16 wan-shared-encoders mirror ships only
+# text_encoder/ + vae/ — NOT image_encoder/ — so image modes (I2V/FLF2V/Animate/
+# S2V) can't load CLIP from it. CLIP-ViT-H/14 is IDENTICAL across every Wan image
+# model, so resolve it from an eviction-safe local dir if populated, else straight
+# from an upstream I2V repo's image_encoder/ subfolder (downloads ~2.5 GB once).
+from pipelines.handle import LOCAL_BF16_ROOT  # noqa: E402
+LOCAL_SHARED = LOCAL_BF16_ROOT / "wan-shared-encoders"
+CLIP_UPSTREAM_REPO = os.getenv("WAN_STUDIO_CLIP_REPO", "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers")
+
+
+def _clip_source() -> str:
+    """Resolve a path/repo that carries image_encoder/ + image_processor/.
+
+    ZeroGPU: the shared-encoders mount (via _shared_path). Local: an eviction-safe
+    ~/wan-bf16/wan-shared-encoders if it has image_encoder/, else the upstream I2V
+    repo (survives a --purge-fp32 of any single converted model)."""
+    if os.getenv("SPACES_ZERO_GPU") is not None:
+        return _shared_path()
+    if (LOCAL_SHARED / "image_encoder").is_dir():
+        return str(LOCAL_SHARED)
+    return CLIP_UPSTREAM_REPO
+
 
 def _shared_path() -> str:
     """Resolve the shared-encoders dir.
@@ -87,6 +109,25 @@ def vae():
     # Memory savers — required at higher resolutions on every backend.
     instance.enable_tiling()
     instance.enable_slicing()
+
+    # ENCODE dtype fix (MPS bf16 VAE). diffusers' Wan pipelines HARDCODE the
+    # VAE-encode input to fp32 (pipeline_wan_video2video L635, and the I2V/FLF2V/
+    # VACE image/video conditioning paths) because their documented contract is an
+    # fp32 VAE. We run a bf16 VAE (cuts 14B decode peak 131.9→92.4GB, pixel-identical
+    # on decode), so an fp32 conditioning tensor hits bf16 conv weights →
+    # "Input type (float) and bias type (BFloat16) should be the same". Decode is
+    # safe (it casts latents to vae.dtype), only ENCODE mismatches. Cast the encode
+    # input to the VAE's own dtype so every conditioning mode (v2v/i2v/flf2v/vace)
+    # works while keeping the bf16 decode memory win. bf16 keeps fp32's exponent
+    # range, so no overflow — same rationale as the decode default.
+    _orig_encode = instance.encode
+
+    def _encode_cast_dtype(x, *args, **kwargs):
+        if hasattr(x, "to"):
+            x = x.to(instance.dtype)
+        return _orig_encode(x, *args, **kwargs)
+
+    instance.encode = _encode_cast_dtype
     return instance
 
 
@@ -97,7 +138,7 @@ def image_encoder():
     from transformers import CLIPVisionModel
 
     return CLIPVisionModel.from_pretrained(
-        _shared_path(),
+        _clip_source(),
         subfolder="image_encoder",
         torch_dtype=torch.float32,  # must stay fp32 per diffusers docs
     )
@@ -108,4 +149,4 @@ def image_processor():
     """CLIPImageProcessor — required by WanAnimatePipeline (Phase #2)."""
     from transformers import CLIPImageProcessor
 
-    return CLIPImageProcessor.from_pretrained(_shared_path(), subfolder="image_processor")
+    return CLIPImageProcessor.from_pretrained(_clip_source(), subfolder="image_processor")

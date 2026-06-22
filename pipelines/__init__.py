@@ -22,7 +22,16 @@ from pipelines.i2v import I2VHandle, aspect_ratio_resize
 from pipelines.v2v import V2VHandle  # noqa: F401
 from pipelines.flf2v import FLF2VHandle  # noqa: F401
 from pipelines.vace import VACEHandle  # noqa: F401
+from pipelines.ti2v import TI2VHandle  # noqa: F401
+from pipelines.animate import AnimateHandle  # noqa: F401
 from pipelines.handlers import HANDLER_REGISTRY, HandlerSpec, register  # noqa: F401
+
+# MPS correctness patches (no-op off MPS): query+key-chunked flash attention for
+# long Wan self-attention sequences — fixes the 720p-grid noise (the fused MPS SDPA
+# returns wrong output over ~14k keys). Applied at import so app.py + local_verify
+# both get it. See pipelines/mps_patches.py.
+from pipelines.mps_patches import apply_mps_patches  # noqa: E402
+apply_mps_patches()
 
 __all__ = [
     "ALL_MODELS",
@@ -44,6 +53,7 @@ __all__ = [
     "V2VHandle",
     "FLF2VHandle",
     "VACEHandle",
+    "TI2VHandle",
     "aspect_ratio_resize",
     "HANDLER_REGISTRY",
     "HandlerSpec",

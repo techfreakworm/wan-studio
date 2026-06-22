@@ -86,6 +86,31 @@ def _saturation(a: np.ndarray) -> float:
     return float(s.mean())
 
 
+def _spatial_autocorr(gray: np.ndarray, k: int = 8) -> float:
+    """Lag-k (k=8) spatial autocorrelation — mean of horizontal+vertical
+    correlation between pixels 8 apart. The DECISIVE noise discriminator.
+
+    Why lag-8, not lag-1: under-denoised output from the VAE is COARSE coloured
+    BLOB noise (~4-8px blobs), NOT pixel static — so lag-1 (adjacent pixels) is
+    HIGH (0.96) for both noise and real, and useless. At lag-8 a real scene stays
+    correlated (smooth regions/edges span >8px → 0.82-0.95) while blob-noise has
+    decorrelated (measured 0.17 on the i2v_720p confetti). Threshold 0.5 cleanly
+    separates (noise 0.17 ≪ 0.5 ≪ real 0.82+). This is the gate that catches the
+    LOW-saturation confetti the neon-saturation gate misses. (Still necessary-not-
+    sufficient — EYEBALL remains the final arbiter for semantic coherence.)"""
+    a = gray.astype(np.float32)
+
+    def _corr(u: np.ndarray, v: np.ndarray) -> float:
+        u = u.ravel() - u.mean()
+        v = v.ravel() - v.mean()
+        d = float(np.sqrt((u * u).sum() * (v * v).sum()))
+        return float((u * v).sum() / d) if d > 1e-6 else 0.0
+
+    h = _corr(a[:, :-k], a[:, k:])
+    v = _corr(a[:-k, :], a[k:, :])
+    return 0.5 * (h + v)
+
+
 def quality_report(frames_raw) -> dict:
     arrs = to_uint8_frames(frames_raw)
     grays = [a.mean(-1) for a in arrs]
@@ -93,6 +118,7 @@ def quality_report(frames_raw) -> dict:
     contrast = [float(g.std()) for g in grays]
     sharp = [_laplacian_var(g) for g in grays]
     sat = [_saturation(a) for a in arrs]
+    autocorr = [_spatial_autocorr(g) for g in grays]
     motion = [
         float(np.abs(grays[i].astype(np.float32) - grays[i - 1].astype(np.float32)).mean())
         for i in range(1, len(grays))
@@ -105,6 +131,7 @@ def quality_report(frames_raw) -> dict:
         "contrast_mean": round(float(np.mean(contrast)), 2),
         "sharpness_mean": round(float(np.mean(sharp)), 2),
         "saturation_mean": round(float(np.mean(sat)), 3),
+        "spatial_autocorr_mean": round(float(np.mean(autocorr)), 3),
         "motion_mean": round(float(np.mean(motion)), 3) if motion else 0.0,
         "motion_max": round(float(np.max(motion)), 3) if motion else 0.0,
     }
@@ -114,11 +141,13 @@ def quality_report(frames_raw) -> dict:
         "has_detail": rep["sharpness_mean"] > 1.0,
         "has_motion": rep["motion_mean"] > 0.4,  # real video, not a frozen still
         "not_static": rep["motion_max"] < 80,    # not strobing/garbage either
-        # NOTE: saturation alone does NOT separate a vivid-but-correct scene (an
-        # orange red-panda on green grass legitimately hits ~0.86) from psychedelic
-        # under-denoised noise — a clean vivid frame can out-saturate a broken one.
-        # So this gate only catches PURE neon noise (≈0.98); coherence is judged by
-        # VISUAL inspection of the start/mid/end PNGs, which is the real arbiter.
+        # The DECISIVE structure gate (wan-brain): a real image is locally smooth →
+        # lag-1 spatial autocorrelation ~0.9+; confetti/under-denoised noise ~0.
+        # This catches the LOW-saturation noise the neon gate below misses (i2v_720p
+        # @16-steps was sat 0.37 → passed neon but autocorr ~0 → IS noise).
+        "has_structure": rep["spatial_autocorr_mean"] > 0.5,
+        # Saturation only catches HIGH-sat neon (≈0.93); kept as a second signal.
+        # NOT sufficient alone (vivid-correct scenes hit ~0.86) — eyeball still rules.
         "not_pure_noise": rep["saturation_mean"] < 0.93,
         "no_nan": all(np.isfinite(a).all() for a in arrs),
     }
@@ -191,6 +220,15 @@ def generate_for_mode(card, handle, args, ik):
             num_frames=args.frames, seed=args.seed, preset_kwargs=ik,
             step_callback=_progress,
         )
+    if mode == "ti2v":
+        assert args.image, "ti2v requires --image (init image; text+image→video)"
+        img = Image.open(args.image).convert("RGB")
+        return handle.generate(
+            img, args.prompt, negative_prompt=args.neg,
+            height=args.height, width=args.width,
+            num_frames=args.frames, seed=args.seed, preset_kwargs=ik,
+            step_callback=_progress,
+        )
     if mode == "flf2v":
         assert args.image and args.last_image, "flf2v requires --image and --last-image"
         first = Image.open(args.image).convert("RGB")
@@ -207,6 +245,33 @@ def generate_for_mode(card, handle, args, ik):
         return handle.generate(
             frames, args.prompt, negative_prompt=args.neg, strength=args.strength,
             seed=args.seed, preset_kwargs=ik,
+        )
+    if mode == "animate":
+        assert args.image and args.pose_video and args.face_video, \
+            "animate requires --image, --pose-video, --face-video"
+        import cv2
+
+        def _read_vid(path, n):
+            cap = cv2.VideoCapture(path)
+            out = []
+            while len(out) < n:
+                ok, fr = cap.read()
+                if not ok:
+                    break
+                out.append(Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+            cap.release()
+            return out
+
+        ref = Image.open(args.image).convert("RGB")
+        n = args.frames
+        pose = _read_vid(args.pose_video, n)
+        face = _read_vid(args.face_video, n)
+        seg = max(1, (min(len(pose), len(face)) - 1) // 4 * 4 + 1)
+        pose, face = pose[:seg], face[:seg]
+        return handle.generate(
+            ref, pose, face, prompt=args.prompt, negative_prompt=args.neg,
+            height=args.height, width=args.width, segment_frame_length=seg,
+            seed=args.seed, preset_kwargs=ik, step_callback=_progress,
         )
     if mode == "vace":
         # Reference sub-mode: condition on a reference image (no control video).
@@ -238,6 +303,8 @@ def main() -> int:
     ap.add_argument("--image", default=None)
     ap.add_argument("--last-image", dest="last_image", default=None)
     ap.add_argument("--video", default=None)
+    ap.add_argument("--pose-video", dest="pose_video", default=None, help="animate: pose driving video")
+    ap.add_argument("--face-video", dest="face_video", default=None, help="animate: face driving video")
     ap.add_argument("--strength", type=float, default=0.7)
     ap.add_argument("--fps", type=int, default=16)
     ap.add_argument("--tag", default="", help="suffix for output filename")
